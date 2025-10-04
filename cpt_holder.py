@@ -1,8 +1,9 @@
 from typing import List, Dict, Tuple
 
 from ml_util.classes import ClassInventory
-from supConLearn import logger
+from ml_util.docux_logger import give_logger
 
+logger = give_logger()
 
 class RawCPT:
     skip_fields = ('Concept Id', 'Current Descriptor Effective Date', 'Test Name', 'Lab Name', 'Manufacturer Name',
@@ -47,7 +48,7 @@ class RawCPT:
                     use_values = tuple([raw[i] if i < len(raw) else ''
                                         for i in self.header_inds])
                     if required_fields and min([len(use_values[ind]) for ind in required_inds]) < 1:
-                        logger.info(f"skip input line because it lacks required values: {line.strip()}")
+                        # logger.info(f"skip input line because it lacks required values: {line.strip()}")
                         continue
                     cpt = use_values[cpt_ind]
                     if cpt_is_usable(cpt):

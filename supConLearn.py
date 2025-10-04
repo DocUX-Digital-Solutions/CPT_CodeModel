@@ -1,4 +1,7 @@
 import argparse
+import logging
+import os, shutil
+
 from datasets import DatasetDict
 
 from typing import Dict, Type
@@ -6,7 +9,7 @@ from typing import Dict, Type
 from cpt_holder import RawCPT
 from ml_util.random_utils import set_seed
 from ml_util.classes import ClassInventory
-from ml_util.docux_logger import give_logger
+from ml_util.docux_logger import give_logger, configure_logger
 from ml_util.modelling.supervised_contrastive import SentenceTransformerSupConTrainer
 from ml_util.modelling.batch_all import get_BatchAll_train_dev_test_dict, BatchCache, give_ranges_by_common
 from ml_util.modelling.triplet import get_Triplet_train_dev_test_dict, SentenceTransformerTripletTrainer, \
@@ -14,7 +17,7 @@ from ml_util.modelling.triplet import get_Triplet_train_dev_test_dict, SentenceT
 from ml_util.modelling.sentence_transformer_interface import SentenceTransformerCustomTrainer
 from snap_shot import SnapShot
 
-logger = give_logger('supConLearn')
+logger: logging.Logger = None
 
 supported_loss = ('SupCon', 'Triplet', 'BATriplet', 'BShATriplet', 'VBATriplet')
 
@@ -69,6 +72,8 @@ def get_trainer(args: argparse.PARSER,
                   'class_inventory': class_inventory,
                   'train_batch_cache': train_batch_cache,
                   'eval_batch_cache': eval_batch_cache,
+                  'logging_dir': os.path.join(args.output_dir, 'logs'),
+                  'logger': logger,
                   }
     trainer_class = trainer_class_map[args.loss]
 
@@ -81,7 +86,7 @@ def main():
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--model_name', type=str,
                         default="pritamdeka/PubMedBERT-mnli-snli-scinli-scitail-mednli-stsb")
-    parser.add_argument('--output_dir', type=str, required=True)
+    parser.add_argument('--output_dir_stem', type=str, required=True)
     parser.add_argument('--overwrite_output_dir', action='store_true')
     parser.add_argument('--per_device_train_batch_size', type=int, default=128)
     parser.add_argument('--per_device_eval_batch_size', type=int, default=128)
@@ -97,8 +102,7 @@ def main():
     parser.add_argument('--loss_temperature', type=float, default=0.01)
     parser.add_argument('--evaluation_strategy', type=str, default='epoch')
     parser.add_argument('--logging_steps', type=int, default=10)
-    parser.add_argument('--log_file', type=str, default="sup_con.log")
-    parser.add_argument('--logging_level', type=str, default='DEBUG')
+    parser.add_argument('--log_level', type=str, default='DEBUG')
     parser.add_argument('--loss', type=str, default='SupCon', choices=supported_loss)
     parser.add_argument('--required_fields', type=str, nargs='+', default=['Long', 'Consumer'])
     parser.add_argument('--triplet_loss_margin', type=float, default=0.5)
@@ -111,8 +115,39 @@ def main():
     parser.add_argument('--fp16', action='store_true', help="Must be on GPU!")
     parser.add_argument("--torch_empty_cache_steps", type=int, default=1 ,
                         help="Needed, at least, when running of a MacBook with 24GB physical RAM (MPS).")
+    parser.add_argument('--allow_overwrite', action='store_true')
     args = parser.parse_args()
-    # configure_logger(logger, args.log_file, level=args.logging_level)
+
+    param_fields = {'s': args.seed,
+                    'l_': args.loss,
+                    'b': args.per_device_train_batch_size,
+                    'lr': args.learning_rate,
+                    'e': args.num_train_epochs,
+                    'tr': args.part_train,
+                    'tst': args.part_test,
+                    'wr': args.warmup_ratio,
+                    'wd': args.weight_decay,
+                    'o_': args.optim}
+
+    if len(args.init_cpt_filters) > 0:
+        param_fields['f'] = '.'.join(args.init_cpt_filters)
+
+    args.output_dir = '.'.join(
+        [args.output_dir_stem] +
+        [f"{n}{v}" for n, v in param_fields.items()]
+    )
+
+    args.log_file = os.path.join(args.output_dir, 'logs', 'main.log')
+    if os.path.exists(args.output_dir):
+        if args.allow_overwrite:
+            shutil.rmtree(args.output_dir)
+        else:
+            raise ValueError(f"Already exists: {args.output_dir}; overwrite is not enabled.")
+    os.makedirs(os.path.join(args.output_dir, 'logs'))
+    global logger
+    logger = give_logger()
+    configure_logger(logger, log_file=args.log_file, level=args.log_level)
+    logger.info(f"args: {args}")
 
     set_seed(args.seed)
 
@@ -125,18 +160,18 @@ def main():
     raw_cpt_table = RawCPT(args.cpt_code_file,
                            required_fields=args.required_fields,
                            required_init_strings=args.init_cpt_filters)
-    print(f"raw cpt cnt: {len(raw_cpt_table.by_cpt)}")
+    logger.info(f"raw cpt cnt: {len(raw_cpt_table.by_cpt)}")
     cpt_inventory = raw_cpt_table.give_inventory(min_form_count_per_class=len(args.required_fields))
 
     trainer = get_trainer(args, cpt_inventory)
     init_metrics = trainer.evaluate()
     init_snapshot = SnapShot(cpt_inventory, trainer.holder, trainer.train_dataset)
-    print(f"init_metrics: {init_metrics}")
+    logger.info(f"init_metrics: {init_metrics}")
     trainer.train()
     final_snpshot = SnapShot(cpt_inventory, trainer.holder, trainer.train_dataset)
 
     final_snpshot.compare_to_prev(init_snapshot)
-    print(f"{give_ranges_by_common()}")
+    logger.info(f"{give_ranges_by_common()}")
 
 
 if __name__ == '__main__':

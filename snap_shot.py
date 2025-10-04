@@ -9,6 +9,9 @@ from ml_util.classes import ClassInventory
 from ml_util.modelling.faiss_interface import KMeansWeighted
 from ml_util.modelling.sentence_transformer_interface import SentenceTransformerHolder
 
+from ml_util.docux_logger import give_logger
+
+logger = give_logger()
 
 class SnapShot:
     def __init__(self,
@@ -149,11 +152,13 @@ class SnapShot:
                         ):
         assert np.array_equal(self.labels, prev.labels)
 
+        output = []
+
         prev_sim_error_d = prev.get_sim_errors()
         curr_sim_error_d = self.get_sim_errors()
-        print(f"sim errors: {prev_sim_error_d['train']['diffs'][0]}"
-              f"\nprev train: {prev_sim_error_d['train']['str']}\nprev other: {prev_sim_error_d['other']['str']}\n"
-              f"\ncurr train: {curr_sim_error_d['train']['str']}\ncurr other: {curr_sim_error_d['other']['str']}")
+        output.append(f"sim errors: {prev_sim_error_d['train']['diffs'][0]}"
+                    f"\nprev train: {prev_sim_error_d['train']['str']}\nprev other: {prev_sim_error_d['other']['str']}\n"
+                    f"\ncurr train: {curr_sim_error_d['train']['str']}\ncurr other: {curr_sim_error_d['other']['str']}")
 
         give_loc_stat_str = lambda loc: f"{np.mean(loc):.3f} ({np.std(loc):.3f}, {loc.min():.3f}-{loc.max():.3f})"
 
@@ -163,11 +168,13 @@ class SnapShot:
 
         for sim in self.entry_sim_values:
             mask = self.entry_similarity_matrix.numpy() == sim
-            print(f"sim: {sim} count: {mask.sum()}")
+            output.append(f"sim: {sim} count: {mask.sum()}")
             for n, ranks in (('prev', prev.cossim_ranks), ('curr', self.cossim_ranks)):
-                print(f"sim: {sim}\tranks {n}:\t{give_stat_str(ranks, mask)}")
+                output.append(f"sim: {sim}\tranks {n}:\t{give_stat_str(ranks, mask)}")
 
             for n, all_sims in (('prev', prev.embedding_sim_matrix),
                                 ('curr', self.embedding_sim_matrix),
                                 ):
-                print(f"sim: {sim}\tdiffs {n}:\t{give_stat_str(all_sims, mask)}")
+                output.append(f"sim: {sim}\tdiffs {n}:\t{give_stat_str(all_sims, mask)}")
+
+        logger.info("\n" + "\n".join(output))
