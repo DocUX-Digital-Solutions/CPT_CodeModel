@@ -1,6 +1,6 @@
-from ml_util.faiss_interface import IndexWrapper, KMeans
+from ml_util.modelling.faiss_interface import IndexWrapper, KMeans
 
-from ml_util.sentence_transformer_interface import  SentenceTransformerHolder
+from ml_util.modelling.sentence_transformer_interface import  SentenceTransformerHolder
 
 st_holder = SentenceTransformerHolder.create("pritamdeka/PubMedBERT-mnli-snli-scinli-scitail-mednli-stsb")
 

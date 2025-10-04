@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from ml_util.sentence_transformer_interface import SentenceTransformerHolder
+from ml_util.modelling.sentence_transformer_interface import SentenceTransformerHolder
 from typing import List, Dict, Optional
 from collections import Counter
 
