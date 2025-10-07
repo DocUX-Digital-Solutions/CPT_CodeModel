@@ -6,7 +6,7 @@ from datasets import DatasetDict
 
 from typing import Dict, Type
 
-from cpt_holder import RawCPT
+from src.cpt_holder import RawCPT
 from ml_util.random_utils import set_seed
 from ml_util.classes import ClassInventory
 from ml_util.docux_logger import give_logger, configure_logger
@@ -15,7 +15,7 @@ from ml_util.modelling.batch_all import get_BatchAll_train_dev_test_dict, BatchC
 from ml_util.modelling.triplet import get_Triplet_train_dev_test_dict, SentenceTransformerTripletTrainer, \
     SentenceTransformerAllBatchTripletTrainer
 from ml_util.modelling.sentence_transformer_interface import SentenceTransformerCustomTrainer
-from snap_shot import SnapShot
+from src.snap_shot import SnapShot
 
 logger: logging.Logger = None
 
@@ -113,9 +113,11 @@ def main():
                         help="Keep model output embeddings for subsequent hard batching.")
     parser.add_argument('--optim', type=str, default='adamw_torch')
     parser.add_argument('--fp16', action='store_true', help="Must be on GPU!")
+    parser.add_argument('--bf16', action='store_true')
     parser.add_argument("--torch_empty_cache_steps", type=int, default=1 ,
                         help="Needed, at least, when running of a MacBook with 24GB physical RAM (MPS).")
     parser.add_argument('--allow_overwrite', action='store_true')
+    # parser.add_argument("--device", type=str, default='mps')
     args = parser.parse_args()
 
     param_fields = {'s': args.seed,
@@ -130,12 +132,17 @@ def main():
                     'o_': args.optim}
 
     if len(args.init_cpt_filters) > 0:
-        param_fields['f'] = '.'.join(args.init_cpt_filters)
+        param_fields['f'] = '.'.join(sorted(args.init_cpt_filters))
+
 
     args.output_dir = '.'.join(
         [args.output_dir_stem] +
         [f"{n}{v}" for n, v in param_fields.items()]
     )
+    if args.bf16:
+        args.output_dir  = args.output_dir + '.bf16'
+    if args.fp16:
+        args.output_dir  = args.output_dir + '.fp16'
 
     args.log_file = os.path.join(args.output_dir, 'logs', 'main.log')
     if os.path.exists(args.output_dir):
