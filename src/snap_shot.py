@@ -120,6 +120,8 @@ class SnapShot:
     def get_sim_errors(self) -> Dict:
         out = {}
         for split, loc_inds in (('train', self.train_inds), ('other', self.other_inds)):
+            if len(loc_inds) < 1:
+                continue
             for_cossim = torch.stack(
                 [es[rc] for es, rc in
                  zip(self.entry_similarity_matrix[loc_inds], self.cossim_ranks[loc_inds] - 1)])
@@ -157,14 +159,19 @@ class SnapShot:
         prev_sim_error_d = prev.get_sim_errors()
         curr_sim_error_d = self.get_sim_errors()
         output.append(f"sim errors: {prev_sim_error_d['train']['diffs'][0]}"
-                    f"\nprev train: {prev_sim_error_d['train']['str']}\nprev other: {prev_sim_error_d['other']['str']}\n"
-                    f"\ncurr train: {curr_sim_error_d['train']['str']}\ncurr other: {curr_sim_error_d['other']['str']}")
+                      f"\nprev train: {prev_sim_error_d['train']['str']}")
+        if 'other' in prev_sim_error_d:
+            output.append(f"prev other: {prev_sim_error_d['other']['str']}")
+        output.append(f"curr train: {curr_sim_error_d['train']['str']})")
+        if 'other' in curr_sim_error_d:
+            output.append(f"curr other: {curr_sim_error_d['other']['str']}")
 
         give_loc_stat_str = lambda loc: f"{np.mean(loc):.3f} ({np.std(loc):.3f}, {loc.min():.3f}-{loc.max():.3f})"
 
         give_stat_str = lambda src, in_mask: (
             " ".join([f"{n}\t{give_loc_stat_str(loc)}"
-                      for n, loc in zip(('train', 'other'), self.give_train_masked(src, in_mask=in_mask))]))
+                      for n, loc in zip(('train', 'other'), self.give_train_masked(src, in_mask=in_mask))
+                      if loc is not None and loc.shape[0] > 0]))
 
         for sim in self.entry_sim_values:
             mask = self.entry_similarity_matrix.numpy() == sim
