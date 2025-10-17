@@ -7,23 +7,53 @@ from scipy.stats import pearsonr, spearmanr
 from ml_util.modelling.batch_all import BatchAllDataset, give_ranges_by_common
 from ml_util.classes import ClassInventory
 from ml_util.modelling.faiss_interface import KMeansWeighted
+from ml_util.modelling.searcher import SearchIndex
 from ml_util.modelling.sentence_transformer_interface import SentenceTransformerHolder
 
 from ml_util.docux_logger import give_logger
 
 logger = give_logger()
 
-class SnapShot:
+class EmbeddedBase:
+    def __init__(self,
+                 gpt_inventory: ClassInventory,
+                 holder: SentenceTransformerHolder,
+                 ):
+        self.gpt_inventory = gpt_inventory
+        self.strings, self.labels, self.string_inds = gpt_inventory.get_flat()
+        self.space_size = self.labels.shape[0]
+        self.embeddings = holder.encode_no_grad(self.strings)
+
+
+class Searcher(EmbeddedBase):
+    def __init__(self,
+                 gpt_inventory: ClassInventory,
+                 holder: SentenceTransformerHolder,
+                 *,
+                 n_nearest: int = 10,
+                 ):
+        super().__init__(gpt_inventory, holder)
+        self.holder = holder
+        self.search_index = SearchIndex(self.holder, self.embeddings, self.labels, n_nearest=n_nearest)
+
+    def search(self,
+               query: str) -> List[str]:
+        return [self.gpt_inventory.get_label_with_description(label_ind, score=score)
+                for label_ind, score in zip(*self.search_index.query_search(query))]
+
+
+class SnapShot(EmbeddedBase):
     def __init__(self,
                  gpt_inventory: ClassInventory,
                  holder: SentenceTransformerHolder,
                  train_dataset: BatchAllDataset,
                  ):
-        self.gpt_inventory = gpt_inventory
-        self.strings, self.labels, self.string_inds = gpt_inventory.get_flat()
-        self.space_size = self.labels.shape[0]
-        vecs = holder.encode_no_grad(self.strings)
-        self.km = KMeansWeighted(vecs,
+        super().__init__(gpt_inventory, holder)
+        # self.gpt_inventory = gpt_inventory
+        # self.strings, self.labels, self.string_inds = gpt_inventory.get_flat()
+        # self.space_size = self.labels.shape[0]
+        # vecs = holder.encode_no_grad(self.strings)
+        self.km = KMeansWeighted(self.embeddings,
                                  self.labels,
                                  np.array(give_ranges_by_common()),
                                  gpt_inventory,
