@@ -62,6 +62,10 @@ class RawCPT:
             ])
         pass
 
+    @property
+    def cpt_codes(self) -> List[str]:
+        return sorted(list(self.by_cpt.keys()))
+
     def give_variants_for_cpt(self,
                               cpt_code: str) -> Tuple:
         return tuple([self.value_for_cpt_field(cpt_code, f)
