@@ -6,6 +6,10 @@ from ml_util.docux_logger import give_logger
 logger = give_logger()
 
 class RawCPT:
+    import re
+
+    five_d = re.compile(r"^[0-9]{5}$")
+
     skip_fields = ('Concept Id', 'Current Descriptor Effective Date', 'Test Name', 'Lab Name', 'Manufacturer Name',
                    'Spanish Consumer')
     '''
@@ -17,15 +21,17 @@ class RawCPT:
                  code_file: str,
                  *,
                  required_init_strings: List[str] = None,
-                 required_fields: List[str] = None
+                 required_fields: List[str] = None,
+                 digit_only: bool = False,
                  ):
         self.by_cpt: Dict[str, Tuple[str]] = {}
         self.header_inds = []
         self.field_names: List[str] = []
 
         cpt_is_usable = \
-            lambda cpt: (required_init_strings is None
+            lambda cpt: ((required_init_strings is None
                          or sum([int(cpt.startswith(init_s)) for init_s in required_init_strings]) > 0)
+                         and (digit_only is False or self.five_d.match(cpt)))
 
         cpt_ind = None
         required_inds = None
