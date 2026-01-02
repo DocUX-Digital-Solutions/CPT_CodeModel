@@ -2,6 +2,7 @@ import argparse
 import logging
 import os, shutil
 
+import torch
 from datasets import DatasetDict
 
 from typing import Dict, Type
@@ -61,8 +62,15 @@ trainer_class_map: Dict[str, Type] = \
 
 def get_trainer(args: argparse.PARSER,
                 class_inventory: ClassInventory = None) -> SentenceTransformerCustomTrainer:
-    train_batch_cache = BatchCache(args.per_device_train_batch_size) if args.hard_batching else None
-    eval_batch_cache = BatchCache(args.per_device_eval_batch_size)
+    if args.bf16:
+        vector_dtype = torch.bfloat16
+    elif args.fp16:
+        vector_dtype = torch.float16
+    else:
+        vector_dtype = torch.float32
+    label_dtype = class_inventory.give_torch_dtype()
+    train_batch_cache = BatchCache(args.per_device_train_batch_size, vector_dtype, label_dtype) if args.hard_batching else None
+    eval_batch_cache = BatchCache(args.per_device_eval_batch_size, vector_dtype, label_dtype)
     dataset_dict = get_train_dev_test_dict(class_inventory, args, train_batch_cache)
     loc_kwargs = {'top_args': args,
                   'model_name': args.model_name,
@@ -77,7 +85,9 @@ def get_trainer(args: argparse.PARSER,
                   }
     trainer_class = trainer_class_map[args.loss]
 
-    return trainer_class(**loc_kwargs)
+    trainer = trainer_class(**loc_kwargs)
+
+    return trainer
 
 
 def main():
@@ -117,6 +127,8 @@ def main():
     parser.add_argument("--torch_empty_cache_steps", type=int, default=1 ,
                         help="Needed, at least, when running of a MacBook with 24GB physical RAM (MPS).")
     parser.add_argument('--allow_overwrite', action='store_true')
+    parser.add_argument('--reload_dataloaders_every_n_epochs', type=int, default=1)
+    parser.add_argument('--max_length', type=int, default=512)
     # parser.add_argument("--device", type=str, default='mps')
     args = parser.parse_args()
 
@@ -133,7 +145,6 @@ def main():
 
     if len(args.init_cpt_filters) > 0:
         param_fields['f'] = '.'.join(sorted(args.init_cpt_filters))
-
 
     args.output_dir = '.'.join(
         [args.output_dir_stem] +
