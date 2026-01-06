@@ -24,6 +24,8 @@ class RawCPT:
                  required_fields: List[str] = None,
                  digit_only: bool = False,
                  ):
+        if isinstance(required_init_strings, list) and len(required_init_strings) < 1:
+            required_init_strings = None
         self.by_cpt: Dict[str, Tuple[str]] = {}
         self.header_inds = []
         self.field_names: List[str] = []

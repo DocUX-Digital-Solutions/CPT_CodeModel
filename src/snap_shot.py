@@ -1,4 +1,4 @@
-from typing import List, Dict
+from typing import List, Dict, Iterable
 
 import numpy as np
 import torch
@@ -7,6 +7,7 @@ from scipy.stats import pearsonr, spearmanr
 from ml_util.modelling.batch_all import BatchAllDataset, give_ranges_by_common
 from ml_util.classes import ClassInventory
 from ml_util.modelling.faiss_interface import KMeansWeighted
+from ml_util.modelling.random_projection import RandomProjection
 from ml_util.modelling.searcher import SearchIndex
 from ml_util.modelling.sentence_transformer_interface import SentenceTransformerHolder
 
@@ -14,16 +15,61 @@ from ml_util.docux_logger import give_logger
 
 logger = give_logger()
 
+
 class EmbeddedBase:
     def __init__(self,
                  gpt_inventory: ClassInventory,
                  holder: SentenceTransformerHolder,
+                 *,
+                 batch_size: int = 128,
+                 tranform: RandomProjection = None,
+                 l2_normalize: bool = False,
                  ):
         self.gpt_inventory = gpt_inventory
         self.strings, self.labels, self.string_inds = gpt_inventory.get_flat()
         self.space_size = self.labels.shape[0]
-        self.embeddings = holder.encode_no_grad(self.strings)
+        self._holder = holder
+        self._embeddings: np.ndarray[float] = None
+        self.batch_size = batch_size
+        self.transform = tranform
+        self.l2_normalize = l2_normalize
 
+    def embedding_iter(self,
+                       *,
+                       batch_size: int = None,
+                       l2_normalize: bool = None,
+                       convert_to_tensor: bool = False,
+                       ) -> Iterable[np.ndarray[float]]:
+        if batch_size is None:
+            batch_size = self.batch_size
+        if l2_normalize is None:
+            l2_normalize = self.l2_normalize
+        for e in self._holder.encode_no_grad(self.strings, batch_size=batch_size, l2_norm=l2_normalize,
+                                             convert_to_tensor=convert_to_tensor):
+            yield e
+
+    def get_embeddings(self,
+                       *,
+                       transform: RandomProjection = None,
+                       batch_size: int = None,
+                       l2_normalize: bool = None) -> np.ndarray[float]:
+        if transform is None:
+            transform = self.transform
+        if batch_size is None:
+            batch_size = self.batch_size
+        if l2_normalize is None:
+            l2_normalize = self.l2_normalize
+        out = [transform.apply(e).cpu().numpy() if transform is not None else e
+               for e in self.embedding_iter(batch_size=batch_size, l2_normalize=l2_normalize,
+                                            convert_to_tensor=bool(transform is not None))]
+        return np.concatenate(out)
+
+    @property
+    def embeddings(self):
+        if self._embeddings is None:
+            self._embeddings = self.get_embeddings()
+
+        return self._embeddings
 
 class Searcher(EmbeddedBase):
     def __init__(self,
@@ -31,10 +77,13 @@ class Searcher(EmbeddedBase):
                  holder: SentenceTransformerHolder,
                  *,
                  n_nearest: int = 10,
+                 batch_size: int = 128,
+                 tranform: RandomProjection = None,
+                 l2_normalize: bool = False,
                  ):
-        super().__init__(gpt_inventory, holder)
+        super().__init__(gpt_inventory, holder, batch_size=batch_size, tranform=tranform, l2_normalize=l2_normalize)
         self.holder = holder
-        self.search_index = SearchIndex(self.holder, self.embeddings, self.labels, n_nearest=n_nearest)
+        self.search_index = SearchIndex(self.holder, self.get_embeddings(), self.labels, n_nearest=n_nearest)
 
     def search(self,
                query: str) -> List[str]:
@@ -47,13 +96,17 @@ class SnapShot(EmbeddedBase):
                  gpt_inventory: ClassInventory,
                  holder: SentenceTransformerHolder,
                  train_dataset: BatchAllDataset,
+                 *,
+                 batch_size: int = None,
+                 transform: RandomProjection = None,
+                 l2_normalize: bool = False,
                  ):
-        super().__init__(gpt_inventory, holder)
+        super().__init__(gpt_inventory, holder, batch_size=batch_size, tranform=transform, l2_normalize=l2_normalize)
         # self.gpt_inventory = gpt_inventory
         # self.strings, self.labels, self.string_inds = gpt_inventory.get_flat()
         # self.space_size = self.labels.shape[0]
         # vecs = holder.encode_no_grad(self.strings)
-        self.km = KMeansWeighted(self.embeddings,
+        self.km = KMeansWeighted(self.get_embeddings(),
                                  self.labels,
                                  np.array(give_ranges_by_common()),
                                  gpt_inventory,
@@ -178,6 +231,29 @@ class SnapShot(EmbeddedBase):
 
         return src[train_inds[0], train_inds[1]], src[other_inds[0], other_inds[1]]
 
+    def __str__(self):
+        output = []
+
+        curr_sim_error_d = self.get_sim_errors()
+        output.append(f"curr train: {curr_sim_error_d['train']['str']})")
+        if 'other' in curr_sim_error_d:
+            output.append(f"curr other: {curr_sim_error_d['other']['str']}")
+
+        give_loc_stat_str = lambda loc: f"{np.mean(loc):.3f} ({np.std(loc):.3f}, {loc.min():.3f}-{loc.max():.3f})"
+
+        give_stat_str = lambda src, in_mask: (
+            " ".join([f"{n}\t{give_loc_stat_str(loc)}"
+                      for n, loc in zip(('train', 'other'), self.give_train_masked(src, in_mask=in_mask))
+                      if loc is not None and loc.shape[0] > 0]))
+
+        for sim in self.entry_sim_values:
+            mask = self.entry_similarity_matrix.numpy() == sim
+            output.append(f"sim: {sim} count: {mask.sum()}")
+            n = 'curr'
+            output.append(f"sim: {sim}\tranks {n}:\t{give_stat_str(self.cossim_ranks, mask)}")
+            output.append(f"sim: {sim}\tdiffs {n}:\t{give_stat_str(self.embedding_sim_matrix, mask)}")
+
+        return "\n".join(output)
 
     def compare_to_prev(self,
                         prev: 'SnapShot',

@@ -3,10 +3,12 @@ import logging
 import os, shutil
 
 import torch
+import numpy as np
 from datasets import DatasetDict
 
-from typing import Dict, Type
+from typing import Dict, Type, Tuple
 
+from ml_util.modelling.random_projection import RandomProjection
 from src.cpt_holder import RawCPT
 from ml_util.random_utils import set_seed
 from ml_util.classes import ClassInventory
@@ -16,7 +18,9 @@ from ml_util.modelling.batch_all import get_BatchAll_train_dev_test_dict, BatchC
 from ml_util.modelling.triplet import get_Triplet_train_dev_test_dict, SentenceTransformerTripletTrainer, \
     SentenceTransformerAllBatchTripletTrainer
 from ml_util.modelling.sentence_transformer_interface import SentenceTransformerCustomTrainer
+from sklearn.random_projection import GaussianRandomProjection
 from src.snap_shot import SnapShot
+from ml_util.modelling.faiss_interface import BaseIndexWrapper
 
 logger: logging.Logger = None
 
@@ -25,8 +29,31 @@ supported_loss = ('SupCon', 'Triplet', 'BATriplet', 'BShATriplet', 'VBATriplet')
 
 def get_train_dev_test_dict(cpt_inventory: ClassInventory,
                             args: argparse.PARSER,
-                            batch_cache: BatchCache,
-                            ) -> DatasetDict:
+                            *,
+                            similarity_measure: str = 'cosine_similarity',
+                            ) -> Tuple[DatasetDict, BatchCache, BatchCache]:
+    if args.bf16:
+        vector_dtype = torch.bfloat16
+    elif args.fp16:
+        vector_dtype = torch.float16
+    else:
+        vector_dtype = torch.float32
+    label_dtype = cpt_inventory.give_torch_dtype()
+
+    if args.hard_batching:
+        l2_normalize = bool(args.similarity_measure in ('cosine_similarity'))
+        if args.projection_ratio < 1.0:
+            random_projection = RandomProjection(args.input_dim, int(args.projection_ratio * args.input_dim), args.seed)
+        else:
+            random_projection = None
+        train_batch_cache = BatchCache(args.per_device_train_batch_size, vector_dtype, label_dtype,
+                                       transform=random_projection, l2_normalize=l2_normalize)
+        eval_batch_cache = BatchCache(args.per_device_eval_batch_size, vector_dtype, label_dtype,
+                                      transform=random_projection, l2_normalize=l2_normalize)
+    else:
+        train_batch_cache = None
+        eval_batch_cache = None
+
     loc_args = ()
     loc_kwargs = {'class_inventory': cpt_inventory,
                   'part_train': args.part_train,
@@ -38,17 +65,20 @@ def get_train_dev_test_dict(cpt_inventory: ClassInventory,
                   'test_batch_size': args.per_device_eval_batch_size,
                   }
 
-    if args.loss in ('SupCon'):
-        return get_BatchAll_train_dev_test_dict(*loc_args, **loc_kwargs)
-    elif args.loss == 'Triplet':
-        return get_Triplet_train_dev_test_dict(*loc_args, **loc_kwargs)
-    elif args.loss in ('BATriplet', 'BShATriplet', 'VBATriplet'):
-        return get_BatchAll_train_dev_test_dict(*loc_args,
-                                                train_batch_cache=batch_cache,
-                                                **loc_kwargs,
-                                                )
-    else:
-        raise NotImplementedError
+    def give_dict() -> DatasetDict:
+        if args.loss in ('SupCon'):
+            return get_BatchAll_train_dev_test_dict(*loc_args, **loc_kwargs)
+        elif args.loss == 'Triplet':
+            return get_Triplet_train_dev_test_dict(*loc_args, **loc_kwargs)
+        elif args.loss in ('BATriplet', 'BShATriplet', 'VBATriplet'):
+            return get_BatchAll_train_dev_test_dict(*loc_args,
+                                                    train_batch_cache=train_batch_cache,
+                                                    **loc_kwargs,
+                                                    )
+        else:
+            raise NotImplementedError
+
+    return give_dict(), train_batch_cache, eval_batch_cache
 
 
 trainer_class_map: Dict[str, Type] = \
@@ -62,16 +92,7 @@ trainer_class_map: Dict[str, Type] = \
 
 def get_trainer(args: argparse.PARSER,
                 class_inventory: ClassInventory = None) -> SentenceTransformerCustomTrainer:
-    if args.bf16:
-        vector_dtype = torch.bfloat16
-    elif args.fp16:
-        vector_dtype = torch.float16
-    else:
-        vector_dtype = torch.float32
-    label_dtype = class_inventory.give_torch_dtype()
-    train_batch_cache = BatchCache(args.per_device_train_batch_size, vector_dtype, label_dtype) if args.hard_batching else None
-    eval_batch_cache = BatchCache(args.per_device_eval_batch_size, vector_dtype, label_dtype)
-    dataset_dict = get_train_dev_test_dict(class_inventory, args, train_batch_cache)
+    dataset_dict, train_batch_cache, eval_batch_cache = get_train_dev_test_dict(class_inventory, args)
     loc_kwargs = {'top_args': args,
                   'model_name': args.model_name,
                   'train_dataset': dataset_dict['train'],
@@ -129,6 +150,11 @@ def main():
     parser.add_argument('--allow_overwrite', action='store_true')
     parser.add_argument('--reload_dataloaders_every_n_epochs', type=int, default=1)
     parser.add_argument('--max_length', type=int, default=512)
+    parser.add_argument('--input_dim', type=int, default=768)
+    parser.add_argument('--projection_ratio', type=float, default=0.5)
+    parser.add_argument('--similarity_measure', type=str, default='cosine_similarity',
+                        choices=BaseIndexWrapper.supported_similarity_measures)
+    parser.add_argument('--save_strategy', default='epoch')
     # parser.add_argument("--device", type=str, default='mps')
     args = parser.parse_args()
 
@@ -141,9 +167,10 @@ def main():
                     'tst': args.part_test,
                     'wr': args.warmup_ratio,
                     'wd': args.weight_decay,
-                    'o_': args.optim}
+                    'o_': args.optim,
+                    'gn_': args.max_grad_norm}
 
-    if len(args.init_cpt_filters) > 0:
+    if args.init_cpt_filters is not None and len(args.init_cpt_filters) > 0:
         param_fields['f'] = '.'.join(sorted(args.init_cpt_filters))
 
     args.output_dir = '.'.join(
@@ -183,12 +210,16 @@ def main():
 
     trainer = get_trainer(args, cpt_inventory)
     init_metrics = trainer.evaluate()
-    init_snapshot = SnapShot(cpt_inventory, trainer.holder, trainer.train_dataset)
+    snapshot_kwargs = {'batch_size': args.per_device_train_batch_size,
+                       'l2_normalize': bool(args.similarity_measure in ('cosine_similarity')),
+                       'transform': trainer.train_batch_cache.transform,
+                       }
+    init_snapshot = SnapShot(cpt_inventory, trainer.holder, trainer.train_dataset, **snapshot_kwargs)
     logger.info(f"init_metrics: {init_metrics}")
     trainer.train()
-    final_snpshot = SnapShot(cpt_inventory, trainer.holder, trainer.train_dataset)
+    final_snapshot = SnapShot(cpt_inventory, trainer.holder, trainer.train_dataset, **snapshot_kwargs)
 
-    final_snpshot.compare_to_prev(init_snapshot)
+    final_snapshot.compare_to_prev(init_snapshot)
     logger.info(f"{give_ranges_by_common()}")
 
 
