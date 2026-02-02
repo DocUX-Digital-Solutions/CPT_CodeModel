@@ -96,7 +96,7 @@ import re
 
 five_d = re.compile(r"^[0-9]{5}$")
 
-ready = [raw_cpt_table.value_for_cpt_field(cpt, 'Long') for cpt in raw_cpt_table.cpt_codes if five_d.match(cpt)]
+ready = [raw_cpt_table.value_for_code_field(cpt, 'Long') for cpt in raw_cpt_table.codes if five_d.match(cpt)]
 
 for d in spacy_holder.run_pipe(ready):
     for s in d.sents:

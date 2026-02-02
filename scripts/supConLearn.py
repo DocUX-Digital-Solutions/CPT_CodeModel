@@ -3,13 +3,13 @@ import logging
 import os, shutil
 
 import torch
-import numpy as np
 from datasets import DatasetDict
 
 from typing import Dict, Type, Tuple
 
 from ml_util.modelling.random_projection import RandomProjection
-from src.cpt_holder import RawCPT
+from src.cpt_holder import get_raw_code_table
+from src.cpt_holder import supported_tasks as supported_raw_tasks
 from ml_util.random_utils import set_seed
 from ml_util.classes import ClassInventory
 from ml_util.docux_logger import give_logger, configure_logger
@@ -18,7 +18,6 @@ from ml_util.modelling.batch_all import get_BatchAll_train_dev_test_dict, BatchC
 from ml_util.modelling.triplet import get_Triplet_train_dev_test_dict, SentenceTransformerTripletTrainer, \
     SentenceTransformerAllBatchTripletTrainer
 from ml_util.modelling.sentence_transformer_interface import SentenceTransformerCustomTrainer
-from sklearn.random_projection import GaussianRandomProjection
 from src.snap_shot import SnapShot
 from ml_util.modelling.faiss_interface import BaseIndexWrapper
 
@@ -27,7 +26,7 @@ logger: logging.Logger = None
 supported_loss = ('SupCon', 'Triplet', 'BATriplet', 'BShATriplet', 'VBATriplet')
 
 
-def get_train_dev_test_dict(cpt_inventory: ClassInventory,
+def get_train_dev_test_dict(code_inventory: ClassInventory,
                             args: argparse.PARSER,
                             *,
                             similarity_measure: str = 'cosine_similarity',
@@ -38,7 +37,7 @@ def get_train_dev_test_dict(cpt_inventory: ClassInventory,
         vector_dtype = torch.float16
     else:
         vector_dtype = torch.float32
-    label_dtype = cpt_inventory.give_torch_dtype()
+    label_dtype = code_inventory.give_torch_dtype()
 
     if args.hard_batching:
         l2_normalize = bool(args.similarity_measure in ('cosine_similarity'))
@@ -55,7 +54,7 @@ def get_train_dev_test_dict(cpt_inventory: ClassInventory,
         eval_batch_cache = None
 
     loc_args = ()
-    loc_kwargs = {'class_inventory': cpt_inventory,
+    loc_kwargs = {'class_inventory': code_inventory,
                   'part_train': args.part_train,
                   'part_test': args.part_test,
                   'shuffle': args.shuffle_data,
@@ -155,6 +154,7 @@ def main():
     parser.add_argument('--similarity_measure', type=str, default='cosine_similarity',
                         choices=BaseIndexWrapper.supported_similarity_measures)
     parser.add_argument('--save_strategy', default='epoch')
+    parser.add_argument('--task_type', type=str, default='CPT', choices=supported_raw_tasks )
     # parser.add_argument("--device", type=str, default='mps')
     args = parser.parse_args()
 
@@ -174,7 +174,7 @@ def main():
         param_fields['f'] = '.'.join(sorted(args.init_cpt_filters))
 
     args.output_dir = '.'.join(
-        [args.output_dir_stem] +
+        [args.output_dir_stem] + [args.task_type] +
         [f"{n}{v}" for n, v in param_fields.items()]
     )
     if args.bf16:
@@ -202,22 +202,26 @@ def main():
     args.do_predict = False
     args.eval_strategy = 'epoch'
 
-    raw_cpt_table = RawCPT(args.cpt_code_file,
-                           required_fields=args.required_fields,
-                           required_init_strings=args.init_cpt_filters)
-    logger.info(f"raw cpt cnt: {len(raw_cpt_table.by_cpt)}")
-    cpt_inventory = raw_cpt_table.give_inventory(min_form_count_per_class=len(args.required_fields))
+    raw_code_table = get_raw_code_table(args.cpt_code_file,
+                                       task_type=args.task_type,
+                                       required_fields=args.required_fields,
+                                       required_init_strings=args.init_cpt_filters)
+    logger.info(f"raw code cnt: {len(raw_code_table.by_code)}")
+    code_inventory = raw_code_table.give_inventory(min_form_count_per_class=len(args.required_fields),
+                                                   name=f"{args.task_type} Inventory")
 
-    trainer = get_trainer(args, cpt_inventory)
+    trainer = get_trainer(args, code_inventory)
     init_metrics = trainer.evaluate()
     snapshot_kwargs = {'batch_size': args.per_device_train_batch_size,
-                       'l2_normalize': bool(args.similarity_measure in ('cosine_similarity')),
-                       'transform': trainer.train_batch_cache.transform,
-                       }
-    init_snapshot = SnapShot(cpt_inventory, trainer.holder, trainer.train_dataset, **snapshot_kwargs)
+                       'l2_normalize': bool(args.similarity_measure in ('cosine_similarity'))}
+    if trainer.train_batch_cache is not None:
+        snapshot_kwargs.update(
+            {'transform': trainer.train_batch_cache.transform}
+        )
+    init_snapshot = SnapShot(code_inventory, trainer.holder, trainer.train_dataset, **snapshot_kwargs)
     logger.info(f"init_metrics: {init_metrics}")
     trainer.train()
-    final_snapshot = SnapShot(cpt_inventory, trainer.holder, trainer.train_dataset, **snapshot_kwargs)
+    final_snapshot = SnapShot(code_inventory, trainer.holder, trainer.train_dataset, **snapshot_kwargs)
 
     final_snapshot.compare_to_prev(init_snapshot)
     logger.info(f"{give_ranges_by_common()}")

@@ -1,5 +1,4 @@
 import argparse
-import logging
 import os
 
 from ml_util.modelling.random_projection import RandomProjection

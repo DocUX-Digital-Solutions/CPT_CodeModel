@@ -1,12 +1,12 @@
-from typing import List, Dict, Iterable
+from typing import List, Dict, Iterable, Tuple
 
 import numpy as np
 import torch
-from scipy.stats import pearsonr, spearmanr
 
 from ml_util.modelling.batch_all import BatchAllDataset, give_ranges_by_common
 from ml_util.classes import ClassInventory
 from ml_util.modelling.faiss_interface import KMeansWeighted
+from ml_util.modelling.utils import to_tensor
 from ml_util.modelling.random_projection import RandomProjection
 from ml_util.modelling.searcher import SearchIndex
 from ml_util.modelling.sentence_transformer_interface import SentenceTransformerHolder
@@ -29,7 +29,7 @@ class EmbeddedBase:
         self.strings, self.labels, self.string_inds = gpt_inventory.get_flat()
         self.space_size = self.labels.shape[0]
         self._holder = holder
-        self._embeddings: np.ndarray[float] = None
+        self._embeddings: torch.Tensor = None
         self.batch_size = batch_size
         self.transform = tranform
         self.l2_normalize = l2_normalize
@@ -38,8 +38,8 @@ class EmbeddedBase:
                        *,
                        batch_size: int = None,
                        l2_normalize: bool = None,
-                       convert_to_tensor: bool = False,
-                       ) -> Iterable[np.ndarray[float]]:
+                       convert_to_tensor: bool = True,
+                       ) -> Iterable[torch.Tensor]:
         if batch_size is None:
             batch_size = self.batch_size
         if l2_normalize is None:
@@ -52,17 +52,17 @@ class EmbeddedBase:
                        *,
                        transform: RandomProjection = None,
                        batch_size: int = None,
-                       l2_normalize: bool = None) -> np.ndarray[float]:
+                       l2_normalize: bool = None) -> torch.Tensor:
         if transform is None:
             transform = self.transform
         if batch_size is None:
             batch_size = self.batch_size
         if l2_normalize is None:
             l2_normalize = self.l2_normalize
-        out = [transform.apply(e).cpu().numpy() if transform is not None else e
+        out = [to_tensor(transform.apply(e).cpu() if transform is not None else e)
                for e in self.embedding_iter(batch_size=batch_size, l2_normalize=l2_normalize,
                                             convert_to_tensor=bool(transform is not None))]
-        return np.concatenate(out)
+        return torch.cat(out)
 
     @property
     def embeddings(self):
@@ -108,48 +108,52 @@ class SnapShot(EmbeddedBase):
         # vecs = holder.encode_no_grad(self.strings)
         self.km = KMeansWeighted(self.get_embeddings(),
                                  self.labels,
-                                 np.array(give_ranges_by_common()),
+                                 torch.tensor(give_ranges_by_common()),
                                  gpt_inventory,
                                  )
 
         self.embedding_sim_matrix = self.km.raw_similarity_matrix
 
         self.train_dataset = train_dataset
-        self._train_mask: np.ndarray[bool] = None
-        self._entry_similarity_matrix: np.ndarray[int] = None
+        self._train_mask: torch.Tensor = None
+        self._entry_similarity_matrix: torch.Tensor = None
+        self._cossim_ranks: torch.Tensor = None
+        self._sorted_sim_ranks: torch.Tensor = None
+        self._top_sim_inds: torch.Tensor = None
+        self._entry_sim_values: torch.Tensor = None
 
     @property
-    def train_inds(self) -> List[int]:
+    def train_inds(self) -> torch.Tensor:
         return self.train_dataset.all_flat_inds
 
     @property
-    def other_inds(self) -> List[int]:
-        return [i for i in range(self.space_size) if i not in self.train_inds]
+    def other_inds(self) -> torch.Tensor:
+        full = torch.arange(self.space_size)
+        matches = (full.unsqueeze(1) == self.train_inds).any(dim=1)
+        return full[~matches]
 
     @property
-    def train_mask(self) -> np.ndarray[bool]:
+    def train_mask(self) -> torch.Tensor:
         if self._train_mask is None:
-            train_mask = np.zeros_like(self.labels, dtype=np.bool_)
+            train_mask = torch.zeros_like(self.labels, dtype=torch.bool)
             train_mask[self.train_dataset.all_flat_inds] = True
-            train_mask = np.expand_dims(train_mask, axis=0).repeat(len(self.labels), axis=0)
+            train_mask = train_mask.expand(len(self.labels), -1)
             train_mask = train_mask * train_mask.T
             self._train_mask = train_mask
 
         return self._train_mask
 
     def _get_entry_similarity_matrix(self):
-        by_row = np.repeat(np.expand_dims(self.labels, 0), self.labels.shape[0], axis=0)
+        by_row = self.labels.expand(self.labels.shape[0], -1)
         entry_similarity_matrix = self.gpt_inventory.label_similarity_matrix[by_row, by_row.T]
-        self._entry_sim_values = np.unique(entry_similarity_matrix)
+        self._entry_sim_values = entry_similarity_matrix.unique()
         # The max value is only for identity...
         self._top_val = self._entry_sim_values.max()
-        self._entry_similarity_matrix = (
-                entry_similarity_matrix +
-                (torch.eye(entry_similarity_matrix.shape[0]) * (1 + self._entry_sim_values.max()))
-        )
+        eye_matrix = (torch.eye(entry_similarity_matrix.shape[0]) * (1 + self._entry_sim_values.max()))
+        self._entry_similarity_matrix = entry_similarity_matrix + eye_matrix
 
     @property
-    def entry_similarity_matrix(self) -> np.ndarray[int]:
+    def entry_similarity_matrix(self) -> torch.Tensor:
         if self._entry_similarity_matrix is None:
             self._get_entry_similarity_matrix()
         return self._entry_similarity_matrix
@@ -167,37 +171,48 @@ class SnapShot(EmbeddedBase):
         return self._top_val
 
     @property
-    def sorted_sim_ranks(self) -> np.ndarray[int]:
-        return self.entry_similarity_matrix.sort(axis=1, descending=True)[0]
+    def sorted_sim_ranks(self) -> torch.Tensor:
+        if self._sorted_sim_ranks is None:
+            self._sorted_sim_ranks = self.entry_similarity_matrix.sort(dim=1, descending=True)[0]
+        return self._sorted_sim_ranks
 
     @property
-    def cossim_ranks(self) -> np.ndarray[int]:
+    def cossim_ranks(self) -> torch.Tensor:
         # 1 for identity...
-        return self.space_size - 1 - self.embedding_sim_matrix.argsort(axis=1).argsort(axis=1)
+        if self._cossim_ranks is None:
+            self._cossim_ranks = self.space_size - 1 - self.embedding_sim_matrix.argsort(dim=1).argsort(axis=1)
+
+        return self._cossim_ranks
 
     def get_correlations(self,
                          *,
-                         use_inds: List[int] = None):
-        ind_prep = lambda m: m[use_inds] if use_inds is not None else m
+                         use_inds: List[int] = None) -> Tuple[float, float]:
+        ind_prep = lambda m: (m[use_inds] if use_inds is not None else m).view(-1)
 
-        pearson = pearsonr(ind_prep(self.entry_similarity_matrix), ind_prep(self.embedding_sim_matrix), axis=1)
-        spearman = spearmanr(ind_prep(self.entry_similarity_matrix), ind_prep(self.embedding_sim_matrix), axis=1)
+        # pearson = pearsonr(ind_prep(self.entry_similarity_matrix), ind_prep(self.embedding_sim_matrix), axis=1)
+        # spearman = spearmanr(ind_prep(self.entry_similarity_matrix), ind_prep(self.embedding_sim_matrix), axis=1)
+        #
+        # return pearson.correlation.mean(), spearman.correlation.mean()
+        from torchmetrics.regression import SpearmanCorrCoef, PearsonCorrCoef
+        loc = (ind_prep(self.entry_similarity_matrix), ind_prep(self.embedding_sim_matrix))
 
-        return pearson.correlation.mean(), spearman.correlation.mean()
+        return PearsonCorrCoef()(*loc).tolist(), SpearmanCorrCoef()(*loc).tolist()
 
     @property
     def top_sim_inds(self) -> torch.Tensor:
-        return torch.argwhere(self.entry_similarity_matrix == self.top_val)
+        if self._top_sim_inds is None:
+            self._top_sim_inds = torch.argwhere(self.entry_similarity_matrix == self.top_val)
+        return self._top_sim_inds
 
     def get_top_rank_analysis(self,
-                              use_inds: List[int] = None):
+                              use_inds: torch.Tensor = None):
         use_top_sim_inds = self.top_sim_inds if use_inds is None else self.top_sim_inds[use_inds]
-        top_ranks = self.cossim_ranks[use_top_sim_inds.T[0], use_top_sim_inds.T[1]]
+        top_ranks = self.cossim_ranks[use_top_sim_inds.T[0], use_top_sim_inds.T[1]].to(torch.float)
 
-        denom = self.space_size if use_inds is None else len(use_inds)
+        denom = self.space_size if use_inds is None else use_inds.shape[0]
         top = [f"{(top_ranks <= n).sum() / float(denom):.3f}" for n in range(1, 10)]
 
-        return (f"top rank mean: {top_ranks.mean():.3f} ({top_ranks.std()}, {top_ranks.min()}-{top_ranks.max()})\t"
+        return (f"top rank mean: {top_ranks.mean():.3f} ({top_ranks.std():.3f}, {top_ranks.min()}-{top_ranks.max()})\t"
                 f"top 10: {top}")
 
     def get_sim_errors(self) -> Dict:
@@ -221,13 +236,13 @@ class SnapShot(EmbeddedBase):
 
         return out
 
-    def give_train_masked(self, src: np.ndarray[bool],
+    def give_train_masked(self, src: torch.Tensor,
                           *,
-                          in_mask: np.ndarray[bool] = None):
+                          in_mask: torch.Tensor = None):
         if in_mask is None:
             in_mask = 1
-        train_inds = np.argwhere(in_mask * self.train_mask).T
-        other_inds = np.argwhere(in_mask * ~self.train_mask).T
+        train_inds = torch.argwhere(in_mask * self.train_mask).T
+        other_inds = torch.argwhere(in_mask * ~self.train_mask).T
 
         return src[train_inds[0], train_inds[1]], src[other_inds[0], other_inds[1]]
 
@@ -258,7 +273,7 @@ class SnapShot(EmbeddedBase):
     def compare_to_prev(self,
                         prev: 'SnapShot',
                         ):
-        assert np.array_equal(self.labels, prev.labels)
+        assert torch.equal(self.labels, prev.labels)
 
         output = []
 
@@ -272,10 +287,10 @@ class SnapShot(EmbeddedBase):
         if 'other' in curr_sim_error_d:
             output.append(f"curr other: {curr_sim_error_d['other']['str']}")
 
-        give_loc_stat_str = lambda loc: f"{np.mean(loc):.3f} ({np.std(loc):.3f}, {loc.min():.3f}-{loc.max():.3f})"
+        give_loc_stat_str = lambda loc: f"{loc.mean():.3f} ({loc.std():.3f}, {loc.min():.3f}-{loc.max():.3f})"
 
         give_stat_str = lambda src, in_mask: (
-            " ".join([f"{n}\t{give_loc_stat_str(loc)}"
+            " ".join([f"{n}\t{give_loc_stat_str(loc.to(torch.float))}"
                       for n, loc in zip(('train', 'other'), self.give_train_masked(src, in_mask=in_mask))
                       if loc is not None and loc.shape[0] > 0]))
 

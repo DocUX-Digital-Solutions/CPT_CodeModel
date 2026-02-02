@@ -8,7 +8,7 @@ logger = give_logger()
 class RawCPT:
     import re
 
-    five_d = re.compile(r"^[0-9]{5}$")
+    legal_form = re.compile(r"^[0-9]{5}$")
 
     skip_fields = ('Concept Id', 'Current Descriptor Effective Date', 'Test Name', 'Lab Name', 'Manufacturer Name',
                    'Spanish Consumer')
@@ -16,7 +16,12 @@ class RawCPT:
     Concept Id	CPT Code	Long	Medium	Short	Consumer	Spanish Consumer	Current Descriptor Effective Date	
     Test Name	Lab Name	Manufacturer Name
     '''
+    header_begin = "Concept Id"
+    code_field_name = 'CPT Code'
     display_fields: List[str] = ['Long', 'Consumer']
+    field_sep = "\t"
+    can_use_line = lambda line: bool(len(line) > 0)
+    normalize_code = lambda code: code
     def __init__(self,
                  code_file: str,
                  *,
@@ -26,64 +31,68 @@ class RawCPT:
                  ):
         if isinstance(required_init_strings, list) and len(required_init_strings) < 1:
             required_init_strings = None
-        self.by_cpt: Dict[str, Tuple[str]] = {}
+        self.by_code: Dict[str, Tuple[str]] = {}
         self.header_inds = []
         self.field_names: List[str] = []
 
-        cpt_is_usable = \
-            lambda cpt: ((required_init_strings is None
-                         or sum([int(cpt.startswith(init_s)) for init_s in required_init_strings]) > 0)
-                         and (digit_only is False or self.five_d.match(cpt)))
+        code_is_usable = \
+            lambda code: ((required_init_strings is None
+                           or sum([int(code.startswith(init_s)) for init_s in required_init_strings]) > 0)
+                          and (digit_only is False or self.legal_form.match(code)))
 
-        cpt_ind = None
+        code_ind = None
         required_inds = None
         with open(code_file, "r", encoding='utf-8') as in_H:
             for line in in_H:
                 line = line.strip()
                 if len(self.header_inds) < 1:
-                    if line.startswith("Concept Id"):
-                        fields = line.strip().split("\t")
+                    if line.startswith(self.header_begin):
+                        fields = line.strip().split(self.field_sep)
                         for ind, field in enumerate(fields):
                             if field not in self.skip_fields:
                                 self.header_inds.append(ind)
                                 self.field_names.append(field)
-                        cpt_ind = self.field_names.index('CPT Code')
+                        code_ind = self.field_names.index(self.code_field_name)
                         if required_fields:
                             required_inds = [self.field_names.index(n) for n in required_fields]
                 else:
                     line = line.strip()
-                    raw: List[str] = line.split("\t")
+                    if not self.can_use_line(line):
+                        continue
+                    raw: List[str] = line.split(self.field_sep)
                     use_values = tuple([raw[i] if i < len(raw) else ''
                                         for i in self.header_inds])
                     if required_fields and min([len(use_values[ind]) for ind in required_inds]) < 1:
                         # logger.info(f"skip input line because it lacks required values: {line.strip()}")
                         continue
-                    cpt = use_values[cpt_ind]
-                    if cpt_is_usable(cpt):
-                        self.by_cpt[cpt] = use_values
+                    code = use_values[code_ind]
+                    if code_is_usable(code):
+                        self.by_code[self.normalize_code(code)] = use_values
 
-        self.value_for_cpt_field = lambda cpt, field: (
-            self.by_cpt[
-                cpt
+        self.value_for_code_field = lambda code, field: (
+            self.by_code[
+                code
             ][
                 self.field_names.index(field)
             ])
         pass
 
     @property
-    def cpt_codes(self) -> List[str]:
-        return sorted(list(self.by_cpt.keys()))
+    def codes(self) -> List[str]:
+        return sorted(list(self.by_code.keys()))
 
-    def give_variants_for_cpt(self,
-                              cpt_code: str) -> Tuple:
-        return tuple([self.value_for_cpt_field(cpt_code, f)
-                      for f in  self.display_fields])
+    # def give_variants_for_codes(self,
+    #                             code: str) -> Tuple:
+    #     return tuple([self.value_for_code_field(code, f)
+    #                   for f in  self.display_fields])
 
     def give_inventory(self,
-                       min_form_count_per_class: int) -> ClassInventory:
-        class_inventory = ClassInventory(name='CPT Inventory')
+                       min_form_count_per_class: int,
+                       *,
+                       name: str = 'CPT Inventory') -> ClassInventory:
+        class_inventory = ClassInventory(name=name)
 
-        for cpt, fields in sorted(self.by_cpt.items()):
+        for code, fields in sorted(self.by_code.items()):
             ready_fields = sorted(list(set(
                 [
                     fields[
@@ -92,6 +101,49 @@ class RawCPT:
                     for n in self.display_fields]
             )))
             if len(ready_fields) >= min_form_count_per_class:
-                class_inventory.add_member(cpt, tuple(ready_fields))
+                class_inventory.add_member(code, tuple(ready_fields))
 
         return class_inventory
+
+
+class RawICD10(RawCPT):
+    import re
+
+    legal_form = re.compile(f"[A-Z][0-9]{2}"
+                            f"("
+                            f"[\.]?"
+                            f"[0-9X]{1-3}"
+                            f"[A-Z]?"
+                            f")?")
+    skip_fields = ('icd_version')
+    display_fields = ['long_title']
+    code_field_name = 'icd_code'
+    header_begin = code_field_name
+    field_sep = ","
+    can_use_line = lambda line: bool(',10,' in line)
+    target_len = 7
+    pad_char = 'X'
+
+    @staticmethod
+    def normalize_code(code):
+        code = code.replace('.', '')
+        code += ''.join([RawICD10.pad_char] * (RawICD10.target_len - len(code)))
+
+        return code
+
+task_class_map = {'CPT': RawCPT,
+                  'ICD10': RawICD10}
+supported_tasks = ('CPT', 'ICD10')
+
+
+def get_raw_code_table(code_file: str,
+                       *,
+                       task_type: List[str] = supported_tasks[0],
+                       required_fields: List[str] = None,
+                       required_init_strings: List[str] = None,
+                       ) -> RawCPT:
+    if task_type not in task_class_map:
+        raise ValueError(f"Unsupported task type: {task_type}")
+
+    return task_class_map[task_type](code_file, required_fields=required_fields,
+                                     required_init_strings=required_init_strings)
