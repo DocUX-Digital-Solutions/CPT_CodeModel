@@ -10,7 +10,7 @@ from src.snap_shot import SnapShot
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--cpt_code_file', type=str, default='Consolidated_Code_List.txt')
+    parser.add_argument('--code_file', type=str, default='Consolidated_Code_List.txt')
     parser.add_argument('--required_fields', type=str, nargs='+', default=['Long', 'Consumer'])
     parser.add_argument('--init_cpt_filters', type=str, nargs='+',
                         help="Only use CPT codes which begin with one of these strings.")
@@ -49,7 +49,7 @@ def main():
     if os.path.exists(output_file):
         raise ValueError(f"Can't overwrite: {output_file}")
 
-    raw_cpt_table = RawCPT(args.cpt_code_file,
+    raw_cpt_table = RawCPT(args.code_file,
                            required_fields=args.required_fields,
                            required_init_strings=args.init_cpt_filters)
     cpt_inventory = raw_cpt_table.give_inventory(min_form_count_per_class=len(args.required_fields))

@@ -112,7 +112,7 @@ def get_trainer(args: argparse.PARSER,
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--cpt_code_file', type=str, default='Consolidated_Code_List.txt')
+    parser.add_argument('--code_file', type=str, default='Consolidated_Code_List.txt')
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--model_name', type=str,
                         default="pritamdeka/PubMedBERT-mnli-snli-scinli-scitail-mednli-stsb")
@@ -134,7 +134,8 @@ def main():
     parser.add_argument('--logging_steps', type=int, default=10)
     parser.add_argument('--log_level', type=str, default='DEBUG')
     parser.add_argument('--loss', type=str, default='SupCon', choices=supported_loss)
-    parser.add_argument('--required_fields', type=str, nargs='+', default=['Long', 'Consumer'])
+    parser.add_argument('--required_fields', type=str, nargs='*')
+                        # default=['Long', 'Consumer'])
     parser.add_argument('--triplet_loss_margin', type=float, default=0.5)
     parser.add_argument('--max_grad_norm', type=float, default=0.5)
     parser.add_argument('--weight_decay', type=float, default=0.0)
@@ -202,13 +203,14 @@ def main():
     args.do_predict = False
     args.eval_strategy = 'epoch'
 
-    raw_code_table = get_raw_code_table(args.cpt_code_file,
+    raw_code_table = get_raw_code_table(args.code_file,
                                        task_type=args.task_type,
                                        required_fields=args.required_fields,
                                        required_init_strings=args.init_cpt_filters)
     logger.info(f"raw code cnt: {len(raw_code_table.by_code)}")
     code_inventory = raw_code_table.give_inventory(min_form_count_per_class=len(args.required_fields),
-                                                   name=f"{args.task_type} Inventory")
+                                                   name=f"{args.task_type} Inventory",
+                                                   max_similarity=raw_code_table.target_len)
 
     trainer = get_trainer(args, code_inventory)
     init_metrics = trainer.evaluate()

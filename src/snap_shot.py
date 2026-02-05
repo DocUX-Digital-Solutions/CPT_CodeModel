@@ -93,7 +93,7 @@ class Searcher(EmbeddedBase):
 
 class SnapShot(EmbeddedBase):
     def __init__(self,
-                 gpt_inventory: ClassInventory,
+                 code_inventory: ClassInventory,
                  holder: SentenceTransformerHolder,
                  train_dataset: BatchAllDataset,
                  *,
@@ -101,15 +101,15 @@ class SnapShot(EmbeddedBase):
                  transform: RandomProjection = None,
                  l2_normalize: bool = False,
                  ):
-        super().__init__(gpt_inventory, holder, batch_size=batch_size, tranform=transform, l2_normalize=l2_normalize)
+        super().__init__(code_inventory, holder, batch_size=batch_size, tranform=transform, l2_normalize=l2_normalize)
         # self.gpt_inventory = gpt_inventory
         # self.strings, self.labels, self.string_inds = gpt_inventory.get_flat()
         # self.space_size = self.labels.shape[0]
         # vecs = holder.encode_no_grad(self.strings)
         self.km = KMeansWeighted(self.get_embeddings(),
                                  self.labels,
-                                 torch.tensor(give_ranges_by_common()),
-                                 gpt_inventory,
+                                 torch.tensor(give_ranges_by_common(code_inventory.max_similarity)),
+                                 code_inventory,
                                  )
 
         self.embedding_sim_matrix = self.km.raw_similarity_matrix
