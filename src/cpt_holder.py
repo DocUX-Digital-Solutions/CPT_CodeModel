@@ -20,8 +20,12 @@ class RawCPT:
     code_field_name = 'CPT Code'
     display_fields: List[str] = ['Long', 'Consumer']
     field_sep = "\t"
-    normalize_code = lambda code: code
     target_len = 5
+    similarity_measure = 'common_init'
+
+    def normalize_code(self,
+                       code):
+        return code
 
     @staticmethod
     def can_use_line(line: str) -> bool:
@@ -96,7 +100,9 @@ class RawCPT:
                        max_similarity: int,
                        *,
                        name: str = 'CPT Inventory') -> ClassInventory:
-        class_inventory = ClassInventory(name=name, max_similarity=max_similarity)
+        class_inventory = ClassInventory(name=name, max_similarity=max_similarity,
+                                         similarity_measure=self.similarity_measure,
+                                         strings_per_class=min_form_count_per_class)
 
         for code, fields in sorted(self.by_code.items()):
             ready_fields = sorted(list(set(
@@ -127,7 +133,7 @@ class RawICD10(RawCPT):
     header_begin = code_field_name
     field_sep = ","
     target_len = 7
-    pad_char = 'X'
+    similarity_measure = 'class_3'
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -140,7 +146,7 @@ class RawICD10(RawCPT):
     @staticmethod
     def normalize_code(code):
         code = code.replace('.', '')
-        code += ''.join([RawICD10.pad_char] * (RawICD10.target_len - len(code)))
+        # code += ''.join([RawICD10.pad_char] * (RawICD10.target_len - len(code)))
 
         return code
 

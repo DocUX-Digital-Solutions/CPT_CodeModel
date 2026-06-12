@@ -104,13 +104,18 @@ class CorpusTracker:
 
     @property
     def lex_type_weights(self) -> np.ndarray[np.float32]:
+        from scipy.stats import chi2
+
         if self._lex_type_weights is None and self._class_inventory is None:
             self._lex_type_weights = self.idf
         elif self._lex_type_weights is None and self._class_inventory is not None:
+            lex_totals = self.unweighted_doc_matrix.todense().sum(axis=0)
             hier_weights: List[np.ndarray[np.float32]] = []
             hier_tf_weights: List[np.ndarray[np.float32]] = []
+            hier_chi2_p : List[np.ndarray[np.float32]] = []
             for cs in self._class_inventory.hierarchical_segmentations:
                 USE_TF = False
+                expected = np.outer((cs.counts / cs.counts.sum()).numpy(), lex_totals)
                 logger.info(f"cs len: {cs.label_length}")
                 mapped_down: coo_matrix = self.unweighted_doc_matrix.copy()
                 logger.info(f"label_inds: {self.label_inds.shape} self.unweighted_doc_matrix.row.max(): {self.unweighted_doc_matrix.row.max()}")
@@ -122,9 +127,14 @@ class CorpusTracker:
                 row_cnt = mapped_down.row.max() + 1
                 if  row_cnt < 2:
                     continue
+                # How about chi-square?
                 if self.idf_method == 'double_normalization':
                     # todense forces summation for shared cells.
                     mapped_down = mapped_down.todense()[:row_cnt]
+                    z = np.sum(np.power(mapped_down - expected, 2) / expected, axis=0)
+                    hier_chi2_p.append(
+                        chi2.sf(z, -1 + row_cnt)
+                    )
                     # Normalize counts by the number of "documents" for each class.
                     mapped_down_tf = (mapped_down /
                           np.expand_dims(cs.counts, 1).repeat(mapped_down.shape[1], axis=1))
@@ -148,6 +158,11 @@ class CorpusTracker:
             else:
                 self._lex_type_weights = np.stack(hier_weights).max(axis=0)
 
+        p_thresh = 0.001
+        hier_chi2_p = np.stack(hier_chi2_p)
+        thresh_filter = hier_chi2_p.min(axis=0) <= p_thresh
+        thresh_voc = [self._vocab._voc[i] for i in np.argwhere(thresh_filter).squeeze().tolist()]
+        lowest_ind = hier_chi2_p.argmin(axis=0)
         assert self._lex_type_weights is not None
         assert isinstance(self._lex_type_weights, np.ndarray) and len(self._lex_type_weights.shape) == 1
 
@@ -283,7 +298,7 @@ cpt_code_file = '../Consolidated_Code_List.txt'
 #raw_cpt_table = RawCPT(cpt_code_file, required_init_strings=['2'])
 #raw_cpt_table = RawCPT(cpt_code_file, required_init_strings=['2'], digit_only=True)
 raw_cpt_table = RawCPT(cpt_code_file, digit_only=True)
-cpt_inventory = raw_cpt_table.give_inventory(min_form_count_per_class=1)
+cpt_inventory = raw_cpt_table.give_inventory(min_form_count_per_class=1, max_similarity=5)
 
 # s = "Anesthesia for open or surgical arthroscopic/endoscopic procedures on distal radius, distal ulna, wrist, or hand joints; not otherwise specified"
 

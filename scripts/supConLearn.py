@@ -23,7 +23,7 @@ from ml_util.modelling.faiss_interface import BaseIndexWrapper
 
 logger: logging.Logger = None
 
-supported_loss = ('SupCon', 'Triplet', 'BATriplet', 'BShATriplet', 'VBATriplet')
+supported_loss = ('SupCon', 'Triplet', 'BATriplet', 'BShATriplet', 'VBATriplet', 'VBAPair')
 
 
 def get_train_dev_test_dict(code_inventory: ClassInventory,
@@ -69,7 +69,7 @@ def get_train_dev_test_dict(code_inventory: ClassInventory,
             return get_BatchAll_train_dev_test_dict(*loc_args, **loc_kwargs)
         elif args.loss == 'Triplet':
             return get_Triplet_train_dev_test_dict(*loc_args, **loc_kwargs)
-        elif args.loss in ('BATriplet', 'BShATriplet', 'VBATriplet'):
+        elif args.loss in ('BATriplet', 'BShATriplet', 'VBATriplet', 'VBAPair'):
             return get_BatchAll_train_dev_test_dict(*loc_args,
                                                     train_batch_cache=train_batch_cache,
                                                     **loc_kwargs,
@@ -86,6 +86,7 @@ trainer_class_map: Dict[str, Type] = \
      'BATriplet': SentenceTransformerAllBatchTripletTrainer,
      'BShATriplet': SentenceTransformerAllBatchTripletTrainer,
      'VBATriplet': SentenceTransformerAllBatchTripletTrainer,
+     'VBAPair': SentenceTransformerAllBatchTripletTrainer,
      }
 
 

@@ -16,7 +16,7 @@ def main():
                         help="Only use CPT codes which begin with one of these strings.")
     parser.add_argument('--model_path', type=str, required=True)
     parser.add_argument("--output_file_stem", type=str, default="snapshot")
-    parser.add_argument("--similarity_fn_name", type=str, default="cosine")
+    # parser.add_argument("--similarity_fn_name", type=str, default="cosine")
     parser.add_argument("--similarity_measure", type=str, default="cosine_similarity")
     parser.add_argument('--loss', type=str, default="VBATriplet")
     parser.add_argument('--per_device_train_batch_size', type=int, default=128)
@@ -54,7 +54,7 @@ def main():
                            required_init_strings=args.init_cpt_filters)
     cpt_inventory = raw_cpt_table.give_inventory(min_form_count_per_class=len(args.required_fields))
 
-    holder = SentenceTransformerHolder.create(args.model_path, similarity_fn_name=args.similarity_fn_name)
+    holder = SentenceTransformerHolder.create(args.model_path)
 
     dataset_dict, _, _ = get_train_dev_test_dict(cpt_inventory, args)
 
