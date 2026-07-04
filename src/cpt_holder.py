@@ -11,7 +11,7 @@ class RawCPT:
     legal_form = re.compile(r"^[0-9]{5}$")
 
     skip_fields = ('Concept Id', 'Current Descriptor Effective Date', 'Test Name', 'Lab Name', 'Manufacturer Name',
-                   'Spanish Consumer')
+                   'Spanish Consumer', 'Clinician Descriptor Id')
     '''
     Concept Id	CPT Code	Long	Medium	Short	Consumer	Spanish Consumer	Current Descriptor Effective Date	
     Test Name	Lab Name	Manufacturer Name
@@ -31,6 +31,9 @@ class RawCPT:
     def can_use_line(line: str) -> bool:
         return bool(len(line) > 0)
 
+    def _give_by_code(self):
+        return {}
+
     def __init__(self,
                  code_file: str,
                  *,
@@ -40,7 +43,8 @@ class RawCPT:
                  ):
         if isinstance(required_init_strings, list) and len(required_init_strings) < 1:
             required_init_strings = None
-        self.by_code: Dict[str, Tuple[str]] = {}
+        self.by_code = self._give_by_code()
+
         self.header_inds = []
         self.field_names: List[str] = []
 
@@ -76,15 +80,20 @@ class RawCPT:
                         continue
                     code = use_values[code_ind]
                     if code_is_usable(code):
-                        self.by_code[self.normalize_code(code)] = use_values
+                        self._add_values(self.normalize_code(code), use_values)
 
-        self.value_for_code_field = lambda code, field: (
-            self.by_code[
-                code
-            ][
-                self.field_names.index(field)
-            ])
+    def value_for_code_field(self, code, field):
+        return self.by_code[
+            code
+        ][
+            self.field_names.index(field)
+        ]
         pass
+
+    def _add_values(self,
+                    code,
+                    values):
+        self.by_code[code] = values
 
     @property
     def codes(self) -> List[str]:
@@ -94,6 +103,16 @@ class RawCPT:
     #                             code: str) -> Tuple:
     #     return tuple([self.value_for_code_field(code, f)
     #                   for f in  self.display_fields])
+
+    def _give_ready_fields(self,
+                           fields):
+        return sorted(list(set(
+            [
+                fields[
+                    self.field_names.index(n)
+                ]
+                for n in self.display_fields]
+        )))
 
     def give_inventory(self,
                        min_form_count_per_class: int,
@@ -105,17 +124,27 @@ class RawCPT:
                                          strings_per_class=min_form_count_per_class)
 
         for code, fields in sorted(self.by_code.items()):
-            ready_fields = sorted(list(set(
-                [
-                    fields[
-                        self.field_names.index(n)
-                    ]
-                    for n in self.display_fields]
-            )))
+            ready_fields = self._give_ready_fields(fields)
             if len(ready_fields) >= min_form_count_per_class:
                 class_inventory.add_member(code, tuple(ready_fields))
 
         return class_inventory
+
+
+class RawClinicianCPT(RawCPT):
+    def _give_by_code(self):
+        from collections import defaultdict
+
+        return defaultdict(list)
+
+    def _add_values(self,
+                    code: str,
+                    values: Tuple):
+        self.by_code[code].append(values[-1])
+
+    def _give_ready_fields(self,
+                           fields):
+        return fields
 
 
 class RawICD10(RawCPT):
@@ -151,13 +180,14 @@ class RawICD10(RawCPT):
         return code
 
 task_class_map = {'CPT': RawCPT,
+                  'ClinicianCPT': RawClinicianCPT,
                   'ICD10': RawICD10}
-supported_tasks = ('CPT', 'ICD10')
+supported_tasks = ('CPT', 'ClinicianCPT', 'ICD10')
 
 
 def get_raw_code_table(code_file: str,
                        *,
-                       task_type: List[str] = supported_tasks[0],
+                       task_type: str = supported_tasks[0],
                        required_fields: List[str] = None,
                        required_init_strings: List[str] = None,
                        ) -> RawCPT:

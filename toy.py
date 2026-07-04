@@ -48,6 +48,7 @@ class CPT_table:
 
     @classmethod
     def create(cls,
+               *,
                cpt_table = "Consolidated_Code_List.txt"):
 
         table: Dict[str, CPT_entry] = {}
@@ -90,38 +91,41 @@ def get_cpt_tally(code_tally_csv: str = "CPT_Code_Distribution_NO_PHI_2.txt"):
 
     return cpt_tally
 
-cpt_tally = get_cpt_tally()
+def main():
+    cpt_tally = get_cpt_tally()
 
-cpt_reference_table = CPT_table.create()
-assert all([k in cpt_reference_table
-            for k in cpt_tally.keys()])
+    cpt_reference_table = CPT_table.create()
+    assert all([k in cpt_reference_table
+                for k in cpt_tally.keys()])
 
-model_name = "pritamdeka/S-PubMedBert-MS-MARCO"
-sth = SentenceTransformerHolder.create(model_name=model_name)
+    model_name = "pritamdeka/S-PubMedBert-MS-MARCO"
+    sth = SentenceTransformerHolder.create(model_name=model_name)
 
 
-long_texts = {}
-for code, cnt in sorted([(k, v) for k, v in cpt_tally.items()], key=lambda x: (-x[1], x[0])):
-    long_texts[code] = cpt_reference_table[code].Long
-    print(f"code: {code}\tcnt: {cnt}\t{long_texts[code]}")
+    long_texts = {}
+    for code, cnt in sorted([(k, v) for k, v in cpt_tally.items()], key=lambda x: (-x[1], x[0])):
+        long_texts[code] = cpt_reference_table[code].Long
+        print(f"code: {code}\tcnt: {cnt}\t{long_texts[code]}")
 
-use_codes = sorted(long_texts.keys())
-use_texts = [long_texts[c] for c in use_codes]
-use_encodings = sth.encode(use_texts)
-pair_inds, pair_dist = sth.single_pool_similarity(use_encodings)
+    use_codes = sorted(long_texts.keys())
+    use_texts = [long_texts[c] for c in use_codes]
+    use_encodings = sth.encode(use_texts)
+    pair_inds, pair_dist = sth.single_pool_similarity(use_encodings)
 
-for rank, (pi, d) in enumerate(zip(pair_inds, pair_dist)):
-    print(f"{rank}\t{d}\n{use_codes[pi[0]]}\t{use_texts[pi[0]]}\n{use_codes[pi[1]]}\t{use_texts[pi[1]]}")
+    for rank, (pi, d) in enumerate(zip(pair_inds, pair_dist)):
+        print(f"{rank}\t{d}\n{use_codes[pi[0]]}\t{use_texts[pi[0]]}\n{use_codes[pi[1]]}\t{use_texts[pi[1]]}")
 
-print(f"do 298XX")
+    print(f"do 298XX")
 
-use_codes = sorted([c for c in cpt_reference_table.codes.keys() if c.startswith('298')])
-use_texts = [cpt_reference_table[c].Long for c in use_codes]
-use_encodings = sth.encode(use_texts)
-pair_inds, pair_dist = sth.single_pool_similarity(use_encodings)
+    use_codes = sorted([c for c in cpt_reference_table.codes.keys() if c.startswith('298')])
+    use_texts = [cpt_reference_table[c].Long for c in use_codes]
+    use_encodings = sth.encode(use_texts)
+    pair_inds, pair_dist = sth.single_pool_similarity(use_encodings)
 
-for rank, (pi, d) in enumerate(zip(pair_inds, pair_dist)):
-    print(f"{rank}\t{d}\n{use_codes[pi[0]]}\t{use_texts[pi[0]]}\n{use_codes[pi[1]]}\t{use_texts[pi[1]]}")
+    for rank, (pi, d) in enumerate(zip(pair_inds, pair_dist)):
+        print(f"{rank}\t{d}\n{use_codes[pi[0]]}\t{use_texts[pi[0]]}\n{use_codes[pi[1]]}\t{use_texts[pi[1]]}")
 
+if __name__ == "__main__":
+    main()
 
 
