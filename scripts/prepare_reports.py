@@ -1,10 +1,12 @@
-from ml_util.modelling.faiss_interface import SearchIndexWrapper, give_SearchIndexWrapper
-from ml_util.sentence_breaks import SentenceBreaker
 import re
 from dataclasses import dataclass
 import torch
+from collections import defaultdict, Counter
+
 from typing import List, Tuple, Dict
 
+from ml_util.modelling.faiss_interface import SearchIndexWrapper, give_SearchIndexWrapper
+from ml_util.sentence_breaks import SentenceBreaker
 from ml_util.modelling.sentence_transformer_interface import SentenceTransformerHolder
 from scripts.embed_descriptions import CPT_embeddings
 from src.report_holder import ReportHolder
@@ -147,6 +149,7 @@ def main():
     search_index = give_SearchIndexWrapper(cpt_embeddings.embeddings,
                                            similarity_measure='cosine_similarity' if l2_norm else 'ref_norm')
     model_holder = SentenceTransformerHolder.create(model_name=args.model_name)
+    recall_by_cpt = defaultdict(Counter)
     with open(args.output_jsonl, "w", encoding='utf-8') as out_H:
         all_odi = sorted(list(by_odi.keys()))
         for odi in all_odi:
@@ -170,6 +173,7 @@ def main():
                 matches = torch.nonzero(ids == target_id)
                 if matches.shape[0] < 1:
                     print(f"no match for {pc.cpt4Code} in {odi}.")
+                    recall_by_cpt[pc.cpt4Code][-1] += 1
                 else:
                     by_rank = torch.argsort(matches[:, 1])
                     by_score = torch.argsort(-1 * torch.tensor(distances)[matches[:, 0], matches[:, 1]])
@@ -178,10 +182,13 @@ def main():
                     # use_for_sort = by_combined
                     use_for_sort = by_rank
                     for m_rank, m in enumerate(matches[use_for_sort]):
+                        if m_rank == 0:
+                            recall_by_cpt[pc.cpt4Code][m[1].item()] += 1
                         print(f"{odi}\t{pc.cpt4Code} m: {m_rank} "
                               f"rank for string: {m[1]} "
                               f"dist: {distances[m[0], m[1]]:.3f} "
                               f"{texts[m[0]]}")
+
                         for rank, (score, cpt_id) in enumerate(zip(distances[m[0]][:m[1]], ids[m[0]][:m[1]])):
                             print(f"\tover at {rank} ({score:.3f}): "
                                   f"{cpt_embeddings.label_for_id(cpt_id)} "
@@ -190,26 +197,39 @@ def main():
 
             # Need to check...
 
+    view_inds = (1, 3, 5, 10, 15, 20, 30, 40)
+    by_type = {k: 0 for k in view_inds}
+    by_instance = {k: 0 for k in view_inds}
+    total_instances = 0
+    for cpt_code, tally in sorted(recall_by_cpt.items()):
+        total = sum([v for v in tally.values()])
+        print(f"cpt: {cpt_code} total: {total}")
+        total = float(total)
+        total_instances += total
+        fr = tally.get(-1, 0)
+        print(f"FR:\t{fr} ({fr/total:.2f}%)")
+        cum_vals = []
+        cum = 0
+        for k, v in sorted(tally.items()):
+            if k >= 0:
+                cum += v
+                cum_vals.append((k, cum))
+        c_ind = -1
+        for v_ind in view_inds:
+            while c_ind + 1 < len(cum_vals) and cum_vals[c_ind + 1][0] < v_ind:
+                c_ind += 1
+            loc = 0 if c_ind == -1 else cum_vals[c_ind][1]
+            print(f"{v_ind}\t{loc} ({(100*loc) / total:.2f}%)")
+            if loc > 0:
+                by_type[v_ind] += 1
+                by_instance[v_ind] += loc
+    total_types = float(len(recall_by_cpt))
 
-    return
-
-    with open(args.output_jsonl, "w", encoding='utf-8') as out_H:
-
-        for doc_ind, spans in enumerate(
-                sentence_breaker.give_sentence_spans(raw_docs)
-        ):
-            doc_text = raw_docs[doc_ind]
-
-            def give_for_doc(s_ind, span) -> List[str]:
-                begin = spans[-1 + s_ind] if s_ind > 0 else 0
-                inter = doc_text[begin:span[0]]
-                return [span, inter, doc_text[span[0]:span[1]]]
-
-            for_doc = [give_for_doc(s_ind, span)
-                       for s_ind, span in enumerate(spans)]
-
-            out_str = json.dumps([operative_document_ids[doc_ind], [for_doc]], ensure_ascii=False)
-            out_H.write(out_str + "\n")
+    print(f"SUM by view_ind")
+    for v_ind in view_inds:
+        print(f"{v_ind}"
+              f" types: {by_type[v_ind]} ({(100 * by_type[v_ind]) / total_types:.2f}%)"
+              f" instances: {by_instance[v_ind]} ({(100 * by_instance[v_ind]) / total_instances:.2f}%)")
 
 
 if __name__ == '__main__':
