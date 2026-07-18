@@ -1,5 +1,5 @@
 from ml_util.spacy_interface import  SpacyHolder
-from src.cpt_holder import RawCPT
+from ml_util.cpt_holder import RawCPT
 
 spacy_holder = SpacyHolder.build(disable_modules=["tok2vec", "tagger", "parser", "attribute_ruler", "ner"])
 

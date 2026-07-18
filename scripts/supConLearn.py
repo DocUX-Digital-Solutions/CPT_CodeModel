@@ -8,8 +8,8 @@ from datasets import DatasetDict
 from typing import Dict, Type, Tuple
 
 from ml_util.modelling.random_projection import RandomProjection
-from src.cpt_holder import get_raw_code_table
-from src.cpt_holder import supported_tasks as supported_raw_tasks
+from ml_util.cpt_holder import get_raw_code_table
+from ml_util.cpt_holder import supported_tasks as supported_raw_tasks
 from ml_util.random_utils import set_seed
 from ml_util.classes import ClassInventory
 from ml_util.docux_logger import give_logger, configure_logger

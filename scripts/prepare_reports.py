@@ -1,13 +1,19 @@
 import re
 from dataclasses import dataclass
 import torch
+import numpy as np
 from collections import defaultdict, Counter
 
 from typing import List, Tuple, Dict
 
+from SectionSplitter import SectionSplitter
+#from datasets.packaged_modules.json.json import ujson_dumps
+
+from ml_util.BM25_interface import BM25Index
 from ml_util.modelling.faiss_interface import SearchIndexWrapper, give_SearchIndexWrapper
 from ml_util.sentence_breaks import SentenceBreaker
-from ml_util.modelling.sentence_transformer_interface import SentenceTransformerHolder
+from ml_util.modelling.sentence_transformer_interface import SentenceTransformerHolder, SentenceCrossEncoder
+from ml_util.medspacy_interface import MedSpacyHolder
 from scripts.embed_descriptions import CPT_embeddings
 from src.report_holder import ReportHolder
 
@@ -39,12 +45,15 @@ class ChunkSpans:
 
 class ReportPreparer:
     hr_re = re.compile(r"\n+")
+    plain_space_re = re.compile(r"^[ ]+$")
 
     def __init__(self,
                  *,
                  skip_sent_split: bool = False,
-                 simple_merge_left: int = 20,
-                 simple_merge_right: int = 200):
+                 simple_merge_left: int = 40,
+                 simple_merge_right: int = 200,
+                 need_merge_short_hr: bool = False):
+        self.need_merge_short_hr = need_merge_short_hr
         self.skip_sent_split = skip_sent_split
         if not skip_sent_split:
             self.sentence_breaker = SentenceBreaker.build()
@@ -98,7 +107,8 @@ class ReportPreparer:
         for ind in range(start_ind, 0, -1):
             if spans_with_pre[ind].text_length <= self.simple_merge_left \
                     and spans_with_pre[1 + ind].text_length <= self.simple_merge_right \
-                    and spans_with_pre[ind + 1].texts(raw_doc)[0] == "\n":
+                    and self.plain_space_re.match(spans_with_pre[ind + 1].texts(raw_doc)[0]) is not None:
+                #and spans_with_pre[ind + 1].texts(raw_doc)[0] == "\n":
                 spans_with_pre[ind] = ChunkSpans.merge(spans_with_pre[ind:ind + 2])
                 spans_with_pre.pop(1 + ind)
             else:
@@ -107,7 +117,8 @@ class ReportPreparer:
     def give_spans_with_pre(self,
                             raw_text: str) -> List[ChunkSpans]:
         out = self.give_plain_spans_with_pre(raw_text)
-        # self.merge_short_hr(raw_text, out)
+        if self.need_merge_short_hr:
+            self.merge_short_hr(raw_text, out)
 
         return out
 
@@ -126,8 +137,20 @@ def main():
     parser.add_argument('--n_nearest', type=int, default=20)
     parser.add_argument('--model_name', type=str,
                         default="pritamdeka/PubMedBERT-mnli-snli-scinli-scitail-mednli-stsb")
+    parser.add_argument('--bm25_dir', type=str)
+    parser.add_argument('--bm25_weight', type=float, default=0.25)
+    parser.add_argument('--cross_encoder_model', type=str)
+    parser.add_argument('--cross_trust_remote', action='store_true')
+    parser.add_argument('--min_retain_portion', type=float, default=0.3333)
     args = parser.parse_args()
     input_jsonl = args.input_jsonl
+    min_retain_portion = args.min_retain_portion
+
+    bm25_index = None
+    bm25_weight = args.bm25_weight
+    if args.bm25_dir is not None:
+        import os
+        bm25_index = BM25Index.load(os.path.join(args.bm25_dir, 'bm25_index.json'))
 
     report_preparer = ReportPreparer(skip_sent_split=args.skip_sent_split)
     by_odi: Dict[str, ReportHolder] = {}
@@ -142,6 +165,8 @@ def main():
             # DIGDI
             # if len(by_odi) >= 10:
             #     break
+    medspacy_holder = MedSpacyHolder()
+    section_splitter = SectionSplitter()
 
     l2_norm = args.l2_norm
     n_nearest = args.n_nearest
@@ -150,30 +175,66 @@ def main():
                                            similarity_measure='cosine_similarity' if l2_norm else 'ref_norm')
     model_holder = SentenceTransformerHolder.create(model_name=args.model_name)
     recall_by_cpt = defaultdict(Counter)
+    cross_encoder = None if args.cross_encoder_model is None \
+        else SentenceCrossEncoder.create(args.cross_encoder_model,
+                                         trust_remote_code=args.cross_trust_remote)
     with open(args.output_jsonl, "w", encoding='utf-8') as out_H:
         all_odi = sorted(list(by_odi.keys()))
         for odi in all_odi:
             print(f"odi: {odi}")
             raw_doc = by_odi[odi].pdf_text
-            spans_with_pre = [s for s in report_preparer.give_spans_with_pre(raw_doc)]
-            texts = [raw_doc[s.text_start:s.text_end]
-                     for s in spans_with_pre]
+            texts = []
+            # do_purge = True
+            do_purge = False
+
+            def give_simple():
+                spans_with_pre = [s for s in report_preparer.give_spans_with_pre(raw_doc)]
+                return [raw_doc[s.text_start:s.text_end]
+                        for s in spans_with_pre]
+
+            if not do_purge:
+                texts = give_simple()
+            else:
+                offs, stretches = section_splitter.purge_skip_sections(raw_doc)
+                if sum([len(s) for s in stretches]) < min_retain_portion * len(raw_doc):
+                    texts = give_simple()
+                    print(f"Got less than {min_retain_portion} for: {odi}.")
+                else:
+                    for off, stretch in zip(*section_splitter.purge_skip_sections(raw_doc)):
+                        for s in report_preparer.give_spans_with_pre(stretch):
+                            texts.append(raw_doc[off + s.text_start:off + s.text_end])
             doc_embeddings = torch.cat([b for b in model_holder.encode_no_grad(texts)])
             if l2_norm:
                 doc_embeddings = torch.nn.functional.normalize(doc_embeddings)
             distances, indices = search_index.search(doc_embeddings, n_nearest=n_nearest)
+            if cross_encoder is not None:
+                new_sim = []
+                new_indices = []
+                for t_ind, t, in enumerate(texts):
+                    cross_scores = cross_encoder.score_queries(
+                        queries=[cpt_embeddings.descriptions[i] for i in indices[t_ind]],
+                        candidate=t)
+                    cs_as = (-1 * cross_scores).argsort()
+                    new_sim.append(cross_scores[cs_as])
+                    new_indices.append(indices[t_ind][cs_as])
+                distances, indices = [np.stack(l) for l in (new_sim, new_indices)]
+
             distances, ids, indices = [torch.tensor(a) for a in cpt_embeddings.id_compress(distances, indices)]
+            if bm25_index is not None:
+                d, i = bm25_index.search(texts)
+                bm_distances, bm_ids, bm_indices = [torch.tensor(a) for a in bm25_index.id_compress(d, i)]
+                distances, ids = \
+                    cpt_embeddings.min_max_interpolate(
+                        all_distances=[distances, bm_distances],
+                        all_ids=[ids, bm_ids],
+                        add_weights=[bm25_weight])
             for pc in by_odi[odi].procedure_combinations:
-                try:
-                    target_id = cpt_embeddings.id_for_label(pc.cpt4Code)
-                except ValueError:
-                    continue
-                print(f"cpt {pc.cpt4Code}: "
-                      f"{cpt_embeddings.first_description_for_id(target_id)}")
-                matches = torch.nonzero(ids == target_id)
-                if matches.shape[0] < 1:
+                first_desc, matches = cpt_embeddings.give_matches(pc.cpt4Code, ids)
+                print(f"cpt: {pc.cpt4Code} '{first_desc}'")
+                if first_desc is None or len(matches) < 1:
                     print(f"no match for {pc.cpt4Code} in {odi}.")
                     recall_by_cpt[pc.cpt4Code][-1] += 1
+                    # Show the top matches...
                 else:
                     by_rank = torch.argsort(matches[:, 1])
                     by_score = torch.argsort(-1 * torch.tensor(distances)[matches[:, 0], matches[:, 1]])
@@ -181,6 +242,8 @@ def main():
                     by_combined = (by_rank + by_score).argsort()
                     # use_for_sort = by_combined
                     use_for_sort = by_rank
+                    # if by_max
+                    # use_for_sort = by_score
                     for m_rank, m in enumerate(matches[use_for_sort]):
                         if m_rank == 0:
                             recall_by_cpt[pc.cpt4Code][m[1].item()] += 1
@@ -197,11 +260,14 @@ def main():
 
             # Need to check...
 
+    digits_only = re.compile(r"^[0-9]{5}$")
     view_inds = (1, 3, 5, 10, 15, 20, 30, 40)
     by_type = {k: 0 for k in view_inds}
     by_instance = {k: 0 for k in view_inds}
     total_instances = 0
     for cpt_code, tally in sorted(recall_by_cpt.items()):
+        if digits_only.match(cpt_code) is None:
+            continue
         total = sum([v for v in tally.values()])
         print(f"cpt: {cpt_code} total: {total}")
         total = float(total)
@@ -224,6 +290,8 @@ def main():
                 by_type[v_ind] += 1
                 by_instance[v_ind] += loc
     total_types = float(len(recall_by_cpt))
+
+    print(f"total_types: {total_types} total_instances: {total_instances}")
 
     print(f"SUM by view_ind")
     for v_ind in view_inds:

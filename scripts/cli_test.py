@@ -1,7 +1,7 @@
 import argparse
 import sys
 from ml_util.modelling.sentence_transformer_interface import SentenceTransformerHolder
-from src.cpt_holder import RawCPT
+from ml_util.cpt_holder import RawCPT
 from src.snap_shot import Searcher
 
 

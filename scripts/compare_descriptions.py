@@ -1,4 +1,4 @@
-from src.cpt_holder import get_raw_code_table
+from ml_util.cpt_holder import get_raw_code_table
 import numpy as np
 from difflib import SequenceMatcher
 import jarowinkler as jw
