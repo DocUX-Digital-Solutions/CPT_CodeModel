@@ -59,11 +59,14 @@ def main():
     interface = None
     import re
     for m in code_inventory.members:
-        if re.match(r"2[0-9]{4}$", m.label):
+        if re.match(r"27[0-9]{3}$", m.label):
             text = m.representations[0]
             cpt_cui = umls_cache.code_to_cui.get(m.label)
 
             if interface is None:
+                features = umls_cache.get_features(cpt_cui)
+                for f in sorted(features):
+                    print(f"{f[0]}\t{f[1]}\t{umls_cache.cui_to_preferred_term[f[1]]}")
                 continue
 
             def give_group(gs):

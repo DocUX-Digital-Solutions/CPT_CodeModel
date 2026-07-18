@@ -66,7 +66,7 @@ from pathlib import Path
 
 import networkx as nx
 
-from typing import List
+from typing import List, Dict, FrozenSet, Tuple
 
 csv.field_size_limit(sys.maxsize)
 
@@ -76,6 +76,14 @@ CUI_TO_PREFERRED_TERM_FILE = "cui_to_preferred_term.pkl"
 CODE_TO_CUI_FILE = "code_to_cui.pkl"
 SAB_FOR_CUI_FILE = "sab_for_cui.pkl"
 
+from dataclasses import dataclass
+@dataclass(frozen=True)
+class EdgeWithData:
+    first_cui: str
+    second_cui: str
+    rel: str
+    rela: str
+    sab: str
 
 class UMLSCache:
     """
@@ -320,22 +328,69 @@ class UMLSCache:
         return edges
 
     def get_edges_with_data(self,
-                            cui):
-        return [(p[1], self.graph.get_edge_data(*p))
+                            cui) -> List[EdgeWithData]:
+        return [EdgeWithData(*p, **self.graph.get_edge_data(*p))
                 for p in self.graph.edges(cui)]
 
-    def get_features(self,
-                     cui: str):
-        edges = self.get_edges_with_data(cui)
-        if len(edges) == 1 and edges[0][1]['rela'] in {'has_clinician_form', 'has_consumer_friendly_form'}:
-            cui = edges[0][0]
+    def give_rela(self,
+                  cui: str,
+                  rela: str,
+                  *,
+                  edges: List[EdgeWithData] = None) -> List[EdgeWithData]:
+        if edges is None:
             edges = self.get_edges_with_data(cui)
 
-        out = frozenset([f"{l[1]['rela']}:{l[0]}" for l in edges
-                         if l[1]['rela'] not in {
-                             'clinician_form_of', 'has_clinician_form', 'has_consumer_friendly_form',
-                             'do_not_code_with', 'has_add_on_code', 'specialty_of', 'has_specialty', 'add_on_code_for',
-                             'consumer_friendly_form_of', 'inverse_isa'}])
+        return [e for e in edges if e.rela == rela]
+
+    def mine_rela(self,
+                  cui: str,
+                  *,
+                  rela: str = 'isa',
+                  edges: List[EdgeWithData] = None,
+                  descendant_depth: int = None,
+                  ) -> Dict[str, int]:
+        rela_edges = self.give_rela(cui, edges=edges, rela=rela)
+
+        level = -1
+        seen = {cui: level}
+        while len(rela_edges) > 0:
+            if descendant_depth is not None and level >= descendant_depth:
+                break
+            level += 1
+
+            new_edges = []
+            for e in rela_edges:
+                if e.second_cui not in seen:
+                    seen[e.second_cui] = level
+                    new_edges.extend(
+                        [ne for ne in self.give_rela(e.second_cui, rela)
+                         if ne.second_cui not in seen]
+                    )
+
+            rela_edges = set(new_edges)
+
+        return seen
+
+    def get_features(self,
+                     cui: str,
+                     *,
+                     descendant_depth: int = None) -> FrozenSet[Tuple]:
+        edges = self.get_edges_with_data(cui)
+        if len(edges) == 1 and edges[0].rela in {'has_clinician_form', 'has_consumer_friendly_form'}:
+            cui = edges[0].second_cui
+            edges = self.get_edges_with_data(cui)
+
+        out = frozenset([
+            (l.rela, l.second_cui) for l in edges
+            if l.rela not in {
+                'clinician_form_of', 'has_clinician_form', 'has_consumer_friendly_form',
+                'do_not_code_with', 'has_add_on_code', 'specialty_of', 'has_specialty', 'add_on_code_for',
+                'consumer_friendly_form_of',
+                'inverse_isa'
+            }
+        ])
+
+        # mined_rela = self.mine_rela(cui, edges=edges, descendant_depth=descendant_depth, rela='inverse_isa')
 
         return out
 
