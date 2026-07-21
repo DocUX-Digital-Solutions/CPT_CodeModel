@@ -66,24 +66,85 @@ from pathlib import Path
 
 import networkx as nx
 
-from typing import List, Dict, FrozenSet, Tuple
+from typing import List, Dict, FrozenSet, Tuple, Set
 
 csv.field_size_limit(sys.maxsize)
 
 GRAPH_FILE = "graph.gpickle"
-TERM_TO_CUIS_FILE = "term_to_cuis.pkl"
+# TERM_TO_CUIS_FILE = "term_to_cuis.pkl"
+CUI_TO_TERMS_FILE = "cui_to_terms.pkl"
 CUI_TO_PREFERRED_TERM_FILE = "cui_to_preferred_term.pkl"
 CODE_TO_CUI_FILE = "code_to_cui.pkl"
 SAB_FOR_CUI_FILE = "sab_for_cui.pkl"
+CUI_TO_STN_FILE = "cui_to_stn.pkl"
 
 from dataclasses import dataclass
+
+@dataclass(frozen=True)
+class DataRels:
+    rel: None | str
+    rela: None | str
+
+    def as_dict(self) -> Dict:
+        return {'rel': self.rel,
+                'rela': self.rela}
+
+
+@dataclass(frozen=True)
+class DataForEdge:
+    rel: str
+    rela: str
+    sab: str
+
+
 @dataclass(frozen=True)
 class EdgeWithData:
     first_cui: str
     second_cui: str
-    rel: str
-    rela: str
-    sab: str
+    all_data: FrozenSet[DataForEdge]
+
+    def has_rel(self,
+                rels: Set):
+        assert isinstance(rels, set)
+        return any([d.rel in rels for d in self.all_data])
+
+    def has_rela(self,
+                 relas: Set):
+        assert isinstance(relas, set)
+        return any([d.rela in relas for d in self.all_data])
+
+    def data_with_rel_and_rela(self,
+                         rels: None | Set,
+                         relas: None | Set):
+        all_r = [rels, relas]
+        assert all([r is None or isinstance(r, set) for r in all_r])
+        assert sum([r is not None for r in all_r]) > 0
+
+        return [d for d in self.all_data
+                if all([s is None or v in s
+                        for v, s in zip((d.rel, d.rela), all_r)])]
+
+    def has_rel_and_rela(self,
+                         rels: None | Set,
+                         relas: None | Set) -> bool:
+        return len(self.data_with_rel_and_rela(rels, relas)) > 0
+
+    @classmethod
+    def create(cls,
+               first_cui: str,
+               second_cui: str,
+               all_edge_data,
+               ):
+        if 0 in all_edge_data:
+            all_data = frozenset([DataForEdge(**v)
+                                  for k, v in
+                                  sorted(all_edge_data.items())
+                                  ])
+        else:
+            all_data = frozenset([DataForEdge(**all_edge_data)])
+
+        return cls(first_cui, second_cui, all_data)
+
 
 class UMLSCache:
     """
@@ -97,19 +158,20 @@ class UMLSCache:
     cpt_root_cuis = {'Current Procedural Terminology': 'C1138431'}
     snomed_sab = 'SNOMEDCT_US'
 
-    def __init__(self, graph, term_to_cuis, cui_to_preferred_term, code_to_cui, sab_for_cui):
+    def __init__(self, graph, cui_to_terms, cui_to_preferred_term, code_to_cui, sab_for_cui, cui_to_stn):
         self.graph = graph
-        self.term_to_cuis = term_to_cuis
+        self.cui_to_terms = cui_to_terms
         self.cui_to_preferred_term = cui_to_preferred_term
         self.code_to_cui = code_to_cui
         self.sab_for_cui = sab_for_cui
+        self.cui_to_stn = cui_to_stn
 
     # ----------------------------------------------------------------
     # Construction: build from raw RRF files, or load a cached version
     # ----------------------------------------------------------------
 
     @classmethod
-    def build(cls, mrconso_path, mrrel_path, cache_dir, languages=None, sabs=None, code_sabs=None):
+    def build(cls, mrconso_path, mrrel_path, mrsty_path, cache_dir, languages=None, sabs=None, code_sabs=None):
         """
         Parse MRCONSO.RRF and MRREL.RRF, write the resulting graph and
         lookup tables to cache_dir, and return a ready-to-use UMLSCache.
@@ -125,7 +187,9 @@ class UMLSCache:
         valid_cuis = set(cui_to_preferred_term.keys())
         graph = cls._build_graph(mrrel_path, sabs=sabs, valid_cuis=valid_cuis)
 
-        cache = cls(graph, term_to_cuis, cui_to_preferred_term, code_to_cui, sab_for_cui)
+        cui_to_stn = cls._build_cui_to_stn(mrsty_path, valid_cuis=valid_cuis)
+
+        cache = cls(graph, term_to_cuis, cui_to_preferred_term, code_to_cui, sab_for_cui, cui_to_stn)
         cache.save(cache_dir)
         return cache
 
@@ -135,15 +199,17 @@ class UMLSCache:
         cache_dir = Path(cache_dir)
         with open(cache_dir / GRAPH_FILE, "rb") as f:
             graph = pickle.load(f)
-        with open(cache_dir / TERM_TO_CUIS_FILE, "rb") as f:
-            term_to_cuis = pickle.load(f)
+        with open(cache_dir / CUI_TO_TERMS_FILE, "rb") as f:
+            cui_to_terms = pickle.load(f)
         with open(cache_dir / CUI_TO_PREFERRED_TERM_FILE, "rb") as f:
             cui_to_preferred_term = pickle.load(f)
         with open(cache_dir / CODE_TO_CUI_FILE, "rb") as f:
             code_to_cui = pickle.load(f)
         with open(cache_dir / SAB_FOR_CUI_FILE, "rb")as f:
             sab_for_cui = pickle.load(f)
-        return cls(graph, term_to_cuis, cui_to_preferred_term, code_to_cui, sab_for_cui)
+        with open(cache_dir / CUI_TO_STN_FILE, "rb")as f:
+            cui_to_stn = pickle.load(f)
+        return cls(graph, cui_to_terms, cui_to_preferred_term, code_to_cui, sab_for_cui, cui_to_stn)
 
     def save(self, cache_dir):
         """Write this cache's graph and lookup tables to cache_dir."""
@@ -153,19 +219,39 @@ class UMLSCache:
         print(f"Writing cache to {cache_dir} ...")
         with open(cache_dir / GRAPH_FILE, "wb") as f:
             pickle.dump(self.graph, f, protocol=pickle.HIGHEST_PROTOCOL)
-        with open(cache_dir / TERM_TO_CUIS_FILE, "wb") as f:
-            pickle.dump(self.term_to_cuis, f, protocol=pickle.HIGHEST_PROTOCOL)
+        with open(cache_dir / CUI_TO_TERMS_FILE, "wb") as f:
+            pickle.dump(self.cui_to_terms, f, protocol=pickle.HIGHEST_PROTOCOL)
         with open(cache_dir / CUI_TO_PREFERRED_TERM_FILE, "wb") as f:
             pickle.dump(self.cui_to_preferred_term, f, protocol=pickle.HIGHEST_PROTOCOL)
         with open(cache_dir / CODE_TO_CUI_FILE, "wb") as f:
             pickle.dump(self.code_to_cui, f, protocol=pickle.HIGHEST_PROTOCOL)
         with open(cache_dir / SAB_FOR_CUI_FILE, "wb") as f:
             pickle.dump(self.sab_for_cui, f, protocol=pickle.HIGHEST_PROTOCOL)
+        with open(cache_dir / CUI_TO_STN_FILE, "wb") as f:
+            pickle.dump(self.cui_to_stn, f, protocol=pickle.HIGHEST_PROTOCOL)
         print("Cache written.")
 
     # ----------------------------------------------------------------
     # Internal parsing helpers (used by build())
     # ----------------------------------------------------------------
+
+    @staticmethod
+    def _build_cui_to_stn(mrsty_path, valid_cuis=None):
+        cui_to_stn = {}
+        print(f"Parsing {mrsty_path} ...")
+        with open(mrsty_path, encoding="utf-8") as f:
+            reader = csv.reader(f, delimiter="|")
+            for i, row in enumerate(reader):
+                if i % 500000 == 0 and i > 0:
+                    print(f"  ...{i:,} MRSTY rows processed")
+                cui, sty, stn  = (
+                    row[0], row[1], row[2],
+                )
+                if valid_cuis and cui not in valid_cuis:
+                    continue
+                cui_to_stn[cui] = stn
+
+        return cui_to_stn
 
     @staticmethod
     def _build_term_lookup(mrconso_path, languages=None, sabs=None, code_sabs=None):
@@ -181,9 +267,9 @@ class UMLSCache:
             if sabs is None or len(sabs.intersection(code_sabs)) < len(code_sabs):
                 raise ValueError(f"All code_sab values must be included in sabs!")
 
-        term_to_cuis = defaultdict(set)
+        cui_to_terms = defaultdict(set)
         cui_to_preferred_term = {}
-        code_to_cui = {}
+        code_to_cui = defaultdict(set)
         sab_for_cui = defaultdict(set)
 
         print(f"Parsing {mrconso_path} ...")
@@ -201,11 +287,12 @@ class UMLSCache:
                     continue
                 if sabs and sab not in sabs:
                     continue
-                if len(code) > 0 and sab in code_sabs:
-                    code_to_cui[code] = cui
+                # if len(code) > 0 and sab in code_sabs and ts == "P" and ispref == "Y":
+                if sab in {'CPT'}:
+                    code_to_cui[code].add(cui)
                 sab_for_cui[cui].add(sab)
 
-                term_to_cuis[str_.lower()].add(cui)
+                cui_to_terms[cui].add(str_.lower())
 
                 if ts == "P" and ispref == "Y" and cui not in cui_to_preferred_term:
                     cui_to_preferred_term[cui] = str_
@@ -215,13 +302,13 @@ class UMLSCache:
         # Fallback: any CUI without a captured preferred term just gets
         # whatever the first string we saw was, so downstream lookups don't
         # KeyError.
-        for term, cuis in term_to_cuis.items():
-            for cui in cuis:
-                cui_to_preferred_term.setdefault(cui, term)
+        for cui, terms in cui_to_terms.items():
+            cui_to_preferred_term.setdefault(cui, list(terms)[0])
 
-        print(f"Done. {len(term_to_cuis):,} unique terms, "
+        print(f"Done. "
+              # f"{len(cui_to_terms):,} unique terms, "
               f"{len(cui_to_preferred_term):,} CUIs with labels.")
-        return dict(term_to_cuis), cui_to_preferred_term, code_to_cui, sab_for_cui
+        return dict(cui_to_terms), cui_to_preferred_term, code_to_cui, sab_for_cui
 
     @staticmethod
     def _build_graph(mrrel_path, sabs=None, valid_cuis=None):
@@ -233,7 +320,8 @@ class UMLSCache:
                     (keeps the graph aligned with a filtered term lookup).
         """
         sabs = set(sabs) if sabs else None
-        G = nx.Graph()
+        # G = nx.Graph()
+        G = nx.MultiDiGraph()
 
         print(f"Parsing {mrrel_path} ...")
         with open(mrrel_path, encoding="utf-8") as f:
@@ -254,26 +342,15 @@ class UMLSCache:
                     continue
 
                 # Keep the most specific relationship label available on the edge.
+                if G.has_edge(cui1, cui2):
+                    prev = G.get_edge_data(cui1, cui2)
+                    if {'rel': rel, 'rela': rela, 'sab': sab} in prev.values():
+                        continue
                 G.add_edge(cui1, cui2, rel=rel, rela=rela, sab=sab)
 
         print(f"Done. Graph has {G.number_of_nodes():,} nodes and "
               f"{G.number_of_edges():,} edges.")
         return G
-
-    # ----------------------------------------------------------------
-    # Term <-> CUI resolution
-    # ----------------------------------------------------------------
-
-    def resolve_term(self, term, verbose=True):
-        """Return the set of CUIs matching a term string (case-insensitive, exact match)."""
-        cuis = self.term_to_cuis.get(term.lower(), self.code_to_cui.get(term))
-        if not cuis:
-            raise ValueError(f"No CUI found for term: {term!r}")
-        if isinstance(cuis, str):
-            cuis = [cuis]
-        if verbose and len(cuis) > 1:
-            print(f"Note: '{term}' is ambiguous, matches {len(cuis)} CUIs: {sorted(cuis)}")
-        return cuis
 
     def label(self, cui):
         """Preferred display term for a CUI, falling back to the CUI itself."""
@@ -298,7 +375,8 @@ class UMLSCache:
                                           cui: str,
                                           ):
         if not cui.startswith('C'):
-            cui = self.resolve_term(cui)
+            # cui = self.code_to_cui(cui)
+            raise ValueError
         for c in self.shortest_path_between_cuis(cui, self.cpt_cui_root):
             if self.snomed_sab in self.sab_for_cui[c]:
                 return c
@@ -318,6 +396,9 @@ class UMLSCache:
         edges = []
         for cui1, cui2 in zip(cui_path, cui_path[1:]):
             data = self.graph.get_edge_data(cui1, cui2) or {}
+            if 0 in data:
+                # Just take the first description of the link.
+                data = data[0]
             edges.append({
                 "from_cui": cui1,
                 "to_cui": cui2,
@@ -329,104 +410,100 @@ class UMLSCache:
 
     def get_edges_with_data(self,
                             cui) -> List[EdgeWithData]:
-        return [EdgeWithData(*p, **self.graph.get_edge_data(*p))
+        return [EdgeWithData.create(*p, self.graph.get_edge_data(*p))
                 for p in self.graph.edges(cui)]
 
-    def give_rela(self,
-                  cui: str,
-                  rela: str,
-                  *,
-                  edges: List[EdgeWithData] = None) -> List[EdgeWithData]:
+    def give_rel_and_rela_matches(self,
+                                  cui: str,
+                                  rel: None | str,
+                                  rela: None | str,
+                                  *,
+                                  edges: List[EdgeWithData] = None) -> List[EdgeWithData]:
         if edges is None:
             edges = self.get_edges_with_data(cui)
 
-        return [e for e in edges if e.rela == rela]
+        all_v = [None if r is None else {r} for r in (rel, rela)]
+        return [e
+                for e in edges if e.has_rel_and_rela(*all_v)]
 
-    def mine_rela(self,
-                  cui: str,
-                  *,
-                  rela: str = 'isa',
-                  edges: List[EdgeWithData] = None,
-                  descendant_depth: int = None,
-                  ) -> Dict[str, int]:
-        rela_edges = self.give_rela(cui, edges=edges, rela=rela)
+    def mine_rel(self,
+                 cui: str,
+                 primary_data_rel: DataRels,
+                 *,
+                 secondary_data_rel: DataRels = None,
+                 edges: List[EdgeWithData] = None,
+                 relative_depth: int = None,
+                 ) -> Dict:
+        use_rel = secondary_data_rel if secondary_data_rel else primary_data_rel
+        out = {}
+        for rel_edge in self.give_rel_and_rela_matches(cui, edges=edges, **primary_data_rel.as_dict()):
+            def give_relatives(rel_edges):
+                level = -1
+                seen = {}
+                while len(rel_edges) > 0:
+                    if relative_depth is not None and level >= relative_depth:
+                        break
+                    level += 1
 
-        level = -1
-        seen = {cui: level}
-        while len(rela_edges) > 0:
-            if descendant_depth is not None and level >= descendant_depth:
-                break
-            level += 1
+                    new_edges = []
+                    for e in rel_edges:
+                        if e.second_cui not in seen:
+                            seen[e.second_cui] = level
+                            new_edges.extend(
+                                [ne for ne in self.give_rel_and_rela_matches(e.second_cui, **use_rel.as_dict())
+                                 if ne.second_cui not in seen])
+                    rel_edges = set(new_edges)
 
-            new_edges = []
-            for e in rela_edges:
-                if e.second_cui not in seen:
-                    seen[e.second_cui] = level
-                    new_edges.extend(
-                        [ne for ne in self.give_rela(e.second_cui, rela)
-                         if ne.second_cui not in seen]
-                    )
+                return seen
 
-            rela_edges = set(new_edges)
+            desc = give_relatives([rel_edge])
+            if len(desc) > 1:
+                out[rel_edge.second_cui] = desc
 
-        return seen
+        return out
 
     def get_features(self,
                      cui: str,
                      *,
-                     descendant_depth: int = None) -> FrozenSet[Tuple]:
+                     descendant_depth: int = 2) -> Tuple[str, FrozenSet[Tuple], Dict]:
         edges = self.get_edges_with_data(cui)
-        if len(edges) == 1 and edges[0].rela in {'has_clinician_form', 'has_consumer_friendly_form'}:
-            cui = edges[0].second_cui
-            edges = self.get_edges_with_data(cui)
 
-        out = frozenset([
-            (l.rela, l.second_cui) for l in edges
-            if l.rela not in {
-                'clinician_form_of', 'has_clinician_form', 'has_consumer_friendly_form',
-                'do_not_code_with', 'has_add_on_code', 'specialty_of', 'has_specialty', 'add_on_code_for',
-                'consumer_friendly_form_of',
-                'inverse_isa'
-            }
-        ])
+        def get_set(loc_edges, loc_cui):
+            if len(loc_edges) == 1 and (loc_edges[0].has_rela({'has_clinician_form', 'has_consumer_friendly_form'})
+                                        or loc_edges[0].has_rel({'PAR'})):
+                pass
+                # loc_cui = loc_edges[0].second_cui
+                # loc_edges = self.get_edges_with_data(loc_cui)
 
-        # mined_rela = self.mine_rela(cui, edges=edges, descendant_depth=descendant_depth, rela='inverse_isa')
+            loc_out = frozenset([
+                (d.rel, d.rela, l.second_cui)
+                for l in loc_edges
+                for d in l.all_data
+                if d.rel in {'PAR', 'CHD', 'RB', 'RN'} or
+                   (d.rel in {'RO'} and d.rela not in {
+                       'clinician_form_of', 'has_clinician_form', 'has_consumer_friendly_form',
+                       'do_not_code_with', 'has_add_on_code', 'specialty_of', 'has_specialty', 'add_on_code_for',
+                       'consumer_friendly_form_of'
+                   })])
+            return loc_out, loc_edges, loc_cui
 
-        return out
+        out, edges, cui = get_set(edges, cui)
 
-    def shortest_path_between_terms(self, term1, term2):
-        """
-        Resolve both terms to CUIs (trying every combination if either term
-        is ambiguous), find the shortest CUI path for each combination, and
-        return the overall shortest path translated back into readable terms.
+        all_rel = {}
+        for pri, sec in ((DataRels('PAR', 'inverse_isa'), None),
+                         (DataRels('CHD', 'isa'), None),
+                         (DataRels('RB', None), DataRels('PAR', 'inverse_isa')),
+                         (DataRels('RN', None), DataRels('CHD', 'isa')),
+                         (DataRels('RO', None), DataRels('PAR', 'inverse_isa')),
+                         (DataRels('RO', None), DataRels('CHD', 'isa'))
+                         ):
+            all_rel.update(
+                self.mine_rel(cui, edges=edges[:], relative_depth=descendant_depth, primary_data_rel=pri,
+                              secondary_data_rel=sec)
+            )
 
-        Returns None if no path exists, otherwise a dict with the CUI path,
-        the term path, per-hop relationship details, and which CUIs were
-        used to anchor each term.
-        """
-        cuis1 = self.resolve_term(term1)
-        cuis2 = self.resolve_term(term2)
+        return cui, out, all_rel
 
-        best_path = None
-        best_pair = None
-        for c1 in cuis1:
-            for c2 in cuis2:
-                path = self.shortest_path_between_cuis(c1, c2)
-                if path and (best_path is None or len(path) < len(best_path)):
-                    best_path = path
-                    best_pair = (c1, c2)
-
-        if not best_path:
-            return None
-
-        return {
-            "cui_path": best_path,
-            "term_path": [self.label(cui) for cui in best_path],
-            "edges": self.describe_path_edges(best_path),
-            "start_cui": best_pair[0],
-            "end_cui": best_pair[1],
-            "hops": len(best_path) - 1,
-        }
 
     # ----------------------------------------------------------------
     # Path overlap
@@ -497,6 +574,7 @@ def main():
     build_p = sub.add_parser("build", help="Parse raw RRF files and write a cache to disk.")
     build_p.add_argument("--mrconso", required=True, help="Path to MRCONSO.RRF")
     build_p.add_argument("--mrrel", required=True, help="Path to MRREL.RRF")
+    build_p.add_argument("--mrsty", required=True, help="Path to MRSTY.RRF")
     build_p.add_argument("--cache-dir", required=True, help="Directory to write the cache into")
     build_p.add_argument("--languages", nargs="*", default=["ENG"],
                           help="LAT codes to keep (default: ENG). Pass nothing to keep all.")
@@ -528,7 +606,7 @@ def main():
 
     if args.command == "build":
         languages = args.languages if args.languages else None
-        UMLSCache.build(args.mrconso, args.mrrel, args.cache_dir,
+        UMLSCache.build(args.mrconso, args.mrrel, args.mrsty, args.cache_dir,
                          languages=languages, sabs=args.sabs, code_sabs=args.code_sabs)
         return
 

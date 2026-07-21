@@ -1,3 +1,5 @@
+import random
+
 import spacy
 import scispacy
 from scispacy.linking import EntityLinker
@@ -58,15 +60,23 @@ def main():
     # interface = SciSpacyInterface(model_name="en_core_sci_lg")
     interface = None
     import re
-    for m in code_inventory.members:
-        if re.match(r"27[0-9]{3}$", m.label):
+    members = code_inventory.members[:]
+    members = list(members)
+    random.shuffle(members)
+    for m in members:
+        if re.match(r"2[5-9][0-9]{3}$", m.label):
             text = m.representations[0]
-            cpt_cui = umls_cache.code_to_cui.get(m.label)
+            cpt_cuis = umls_cache.code_to_cui.get(m.label, [])
 
             if interface is None:
-                features = umls_cache.get_features(cpt_cui)
-                for f in sorted(features):
-                    print(f"{f[0]}\t{f[1]}\t{umls_cache.cui_to_preferred_term[f[1]]}")
+                print(f"Start CPT: {m.label}")
+                for cpt_cui in cpt_cuis:
+                    print(f"CPT: {m.label} -> {cpt_cui} -- {'|'.join(umls_cache.cui_to_terms[cpt_cui])}")
+                    use_cpt_cui, features, all_rel = umls_cache.get_features(cpt_cui)
+                    for f in sorted(features):
+                        print(f"{(f[0], f[1])}\t{f[2]}\t{umls_cache.cui_to_stn[f[2]]}\t{'|'.join(umls_cache.cui_to_terms[f[2]])}")
+                        for r in all_rel.get(f[-1], {}).keys():
+                            print(f"\t{r}\t{umls_cache.cui_to_stn[r]}\t{'|'.join(umls_cache.cui_to_terms[r])}")
                 continue
 
             def give_group(gs):
