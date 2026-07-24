@@ -454,10 +454,10 @@ class UMLSCache:
                                  if ne.second_cui not in seen])
                     rel_edges = set(new_edges)
 
-                return seen
+                return {k: v for k, v in seen.items() if v > 0}
 
             desc = give_relatives([rel_edge])
-            if len(desc) > 1:
+            if len(desc) > 0:
                 out[rel_edge.second_cui] = desc
 
         return out
@@ -465,7 +465,7 @@ class UMLSCache:
     def get_features(self,
                      cui: str,
                      *,
-                     descendant_depth: int = 2) -> Tuple[str, FrozenSet[Tuple], Dict]:
+                     descendant_depth: int = 3) -> Tuple[str, FrozenSet[Tuple], Dict]:
         edges = self.get_edges_with_data(cui)
 
         def get_set(loc_edges, loc_cui):
@@ -495,7 +495,7 @@ class UMLSCache:
                          (DataRels('RB', None), DataRels('PAR', 'inverse_isa')),
                          (DataRels('RN', None), DataRels('CHD', 'isa')),
                          (DataRels('RO', None), DataRels('PAR', 'inverse_isa')),
-                         (DataRels('RO', None), DataRels('CHD', 'isa'))
+                         # (DataRels('RO', 'procedure_site_of'), DataRels('CHD', 'isa'))
                          ):
             all_rel.update(
                 self.mine_rel(cui, edges=edges[:], relative_depth=descendant_depth, primary_data_rel=pri,
