@@ -7,6 +7,8 @@ from collections import defaultdict, Counter
 from typing import List, Tuple, Dict
 
 from SectionSplitter import SectionSplitter
+from UMLS.UMLS_ShortestPath import UMLSCache
+from UMLS.quick_umls import QuickUMLS_Matcher
 #from datasets.packaged_modules.json.json import ujson_dumps
 
 from ml_util.BM25_interface import BM25Index
@@ -142,6 +144,9 @@ def main():
     parser.add_argument('--cross_encoder_model', type=str)
     parser.add_argument('--cross_trust_remote', action='store_true')
     parser.add_argument('--min_retain_portion', type=float, default=0.3333)
+    parser.add_argument('--umls_cache_dir', type=str,
+                        default='/Users/stevenfincke/PycharmProjects/CPT_CodeModel/UMLS/cache_2026AA')
+    parser.add_argument('--quick_umls_threshold', type=float, default=0.7)
     args = parser.parse_args()
     input_jsonl = args.input_jsonl
     min_retain_portion = args.min_retain_portion
@@ -167,6 +172,11 @@ def main():
             #     break
     medspacy_holder = MedSpacyHolder()
     section_splitter = SectionSplitter()
+    quick_matcher = QuickUMLS_Matcher(threshold=args.quick_umls_threshold)
+    if args.umls_cache_dir:
+        umls_cache = UMLSCache.load(args.umls_cache_dir)
+    else:
+        umls_cache = None
 
     l2_norm = args.l2_norm
     n_nearest = args.n_nearest
@@ -203,6 +213,7 @@ def main():
                     for off, stretch in zip(*section_splitter.purge_skip_sections(raw_doc)):
                         for s in report_preparer.give_spans_with_pre(stretch):
                             texts.append(raw_doc[off + s.text_start:off + s.text_end])
+
             doc_embeddings = torch.cat([b for b in model_holder.encode_no_grad(texts)])
             if l2_norm:
                 doc_embeddings = torch.nn.functional.normalize(doc_embeddings)
@@ -228,9 +239,37 @@ def main():
                         all_distances=[distances, bm_distances],
                         all_ids=[ids, bm_ids],
                         add_weights=[bm25_weight])
+
+            if quick_matcher is not None:
+                umls_matches = {t[0]: t for t in quick_matcher.give_matches(raw_doc).by_cui()}
+                # how to use indices??
+                index_matches = [
+                    cpt_cui
+                    for id in ids.unique().tolist() if id >= 0
+                    for cpt_cui in umls_cache.code_to_cui.get(cpt_embeddings.label_for_id(id), [])]
+                paths_to_cpts = umls_cache.shortest_paths_between_cui_sets(set(umls_matches.keys()), set(index_matches))
+
+                paths_code_to_umls = defaultdict(dict)
+                for umls_id, for_umls_id in paths_to_cpts.items():
+                    for cpt_id, path in for_umls_id.items():
+                        code = umls_cache.cui_to_code[cpt_id]
+
+                        for_code = paths_code_to_umls.get(code)
+                        if for_code:
+                            prev_path = for_code.get(umls_id)
+                            if prev_path and len(prev_path) <= len(path):
+                                continue
+
+                        paths_code_to_umls[code][umls_id] = path
+                pass
+
+            def sum_inv_for_cpt(cpt_code):
+                return sum([1 / (1 + len(v)) for v in paths_code_to_umls[cpt_code].values()])
+
             for pc in by_odi[odi].procedure_combinations:
                 first_desc, matches = cpt_embeddings.give_matches(pc.cpt4Code, ids)
-                print(f"cpt: {pc.cpt4Code} '{first_desc}'")
+                print(f"cpt: {pc.cpt4Code} '{first_desc}' "
+                      f"umls_inv: {sum_inv_for_cpt(pc.cpt4Code):.2f}")
                 if first_desc is None or len(matches) < 1:
                     print(f"no match for {pc.cpt4Code} in {odi}.")
                     recall_by_cpt[pc.cpt4Code][-1] += 1
@@ -249,14 +288,16 @@ def main():
                             recall_by_cpt[pc.cpt4Code][m[1].item()] += 1
                         print(f"{odi}\t{pc.cpt4Code} m: {m_rank} "
                               f"rank for string: {m[1]} "
-                              f"dist: {distances[m[0], m[1]]:.3f} "
+                              f"dist: {distances[m[0], m[1]]:.3f} "                              
                               f"{texts[m[0]]}")
 
                         for rank, (score, cpt_id) in enumerate(zip(distances[m[0]][:m[1]], ids[m[0]][:m[1]])):
-                            print(f"\tover at {rank} ({score:.3f}): "
-                                  f"{cpt_embeddings.label_for_id(cpt_id)} "
+                            label = cpt_embeddings.label_for_id(cpt_id)
+                            print(f"\tover at {rank} ({score:.3f}): "                                  
+                                  f"{label} "
+                                  f"umls_inv: {sum_inv_for_cpt(label):.2f} "
                                   f"{cpt_embeddings.first_description_for_id(cpt_id)}")
-                pass
+a                pass
 
             # Need to check...
 

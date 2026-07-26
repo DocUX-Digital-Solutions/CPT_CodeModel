@@ -65,8 +65,11 @@ from collections import defaultdict
 from pathlib import Path
 
 import networkx as nx
+import networkit as nk
 
 from typing import List, Dict, FrozenSet, Tuple, Set
+
+from ml_util.network_interface import GraphHolder
 
 csv.field_size_limit(sys.maxsize)
 
@@ -158,11 +161,20 @@ class UMLSCache:
     cpt_root_cuis = {'Current Procedural Terminology': 'C1138431'}
     snomed_sab = 'SNOMEDCT_US'
 
-    def __init__(self, graph, cui_to_terms, cui_to_preferred_term, code_to_cui, sab_for_cui, cui_to_stn):
-        self.graph = graph
+    def __init__(self,
+                 graph_holder: GraphHolder,
+                 cui_to_terms,
+                 cui_to_preferred_term,
+                 code_to_cui,
+                 sab_for_cui,
+                 cui_to_stn):
+        self.graph_holder = graph_holder
         self.cui_to_terms = cui_to_terms
         self.cui_to_preferred_term = cui_to_preferred_term
         self.code_to_cui = code_to_cui
+        self.cui_to_code = {v: k
+                            for k, all_v in self.code_to_cui.items()
+                            for v in all_v}
         self.sab_for_cui = sab_for_cui
         self.cui_to_stn = cui_to_stn
 
@@ -185,7 +197,24 @@ class UMLSCache:
         )
 
         valid_cuis = set(cui_to_preferred_term.keys())
-        graph = cls._build_graph(mrrel_path, sabs=sabs, valid_cuis=valid_cuis)
+        graph = cls._build_graph_holder(mrrel_path, sabs=sabs, valid_cuis=valid_cuis)
+
+        def proc_code_cuis(all_cuis) -> List[int]:
+            if len(all_cuis) <= 1:
+                return all_cuis
+
+            neighbors = {c: graph.give_neighbors(c) for c in all_cuis}
+            use_cuis = []
+            covered_neighbors = set([])
+            for k, v in sorted(neighbors.items(), key=lambda x: (-len(x[1]), x[0])):
+                loc = set([k] + v)
+                if len(covered_neighbors.intersection(loc)) < len(loc):
+                    covered_neighbors.update(loc)
+                    use_cuis.append(k)
+
+            return use_cuis
+
+        code_to_cui = {k: proc_code_cuis(v) for k, v in code_to_cui.items()}
 
         cui_to_stn = cls._build_cui_to_stn(mrsty_path, valid_cuis=valid_cuis)
 
@@ -199,6 +228,7 @@ class UMLSCache:
         cache_dir = Path(cache_dir)
         with open(cache_dir / GRAPH_FILE, "rb") as f:
             graph = pickle.load(f)
+        graph.post_load(cache_dir / GRAPH_FILE)
         with open(cache_dir / CUI_TO_TERMS_FILE, "rb") as f:
             cui_to_terms = pickle.load(f)
         with open(cache_dir / CUI_TO_PREFERRED_TERM_FILE, "rb") as f:
@@ -217,8 +247,9 @@ class UMLSCache:
         cache_dir.mkdir(parents=True, exist_ok=True)
 
         print(f"Writing cache to {cache_dir} ...")
+        self.graph_holder.prepickle(cache_dir / GRAPH_FILE)
         with open(cache_dir / GRAPH_FILE, "wb") as f:
-            pickle.dump(self.graph, f, protocol=pickle.HIGHEST_PROTOCOL)
+            pickle.dump(self.graph_holder, f, protocol=pickle.HIGHEST_PROTOCOL)
         with open(cache_dir / CUI_TO_TERMS_FILE, "wb") as f:
             pickle.dump(self.cui_to_terms, f, protocol=pickle.HIGHEST_PROTOCOL)
         with open(cache_dir / CUI_TO_PREFERRED_TERM_FILE, "wb") as f:
@@ -311,7 +342,9 @@ class UMLSCache:
         return dict(cui_to_terms), cui_to_preferred_term, code_to_cui, sab_for_cui
 
     @staticmethod
-    def _build_graph(mrrel_path, sabs=None, valid_cuis=None):
+    def _build_graph_holder(mrrel_path, sabs=None, valid_cuis=None,
+                            *,
+                            use_networkkit: bool = True) -> GraphHolder:
         """
         Parse MRREL.RRF into an undirected networkx graph of CUIs.
 
@@ -321,7 +354,9 @@ class UMLSCache:
         """
         sabs = set(sabs) if sabs else None
         # G = nx.Graph()
-        G = nx.MultiDiGraph()
+        # G = nx.MultiDiGraph()
+        G = GraphHolder.create(use_networkkit=use_networkkit,
+                               num_nodes=len(valid_cuis) if valid_cuis else None)
 
         print(f"Parsing {mrrel_path} ...")
         with open(mrrel_path, encoding="utf-8") as f:
@@ -342,7 +377,7 @@ class UMLSCache:
                     continue
 
                 # Keep the most specific relationship label available on the edge.
-                if G.has_edge(cui1, cui2):
+                if not G.use_networkkit and G.has_edge(cui1, cui2):
                     prev = G.get_edge_data(cui1, cui2)
                     if {'rel': rel, 'rela': rela, 'sab': sab} in prev.values():
                         continue
@@ -370,6 +405,11 @@ class UMLSCache:
             return nx.shortest_path(self.graph, cui1, cui2, method=method)
         except nx.NetworkXNoPath:
             return None
+
+    def shortest_paths_between_cui_sets(self, set1: Set[str], set2: Set[str],
+                                        *,
+                                        cutoff: int = 5):
+        return self.graph_holder.shortest_paths_between_name_sets(set1, set2, cutoff=cutoff)
 
     def get_cpt_lowest_snomed_predecessor(self,
                                           cui: str,
