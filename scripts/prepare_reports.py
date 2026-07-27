@@ -297,7 +297,7 @@ def main():
                                   f"{label} "
                                   f"umls_inv: {sum_inv_for_cpt(label):.2f} "
                                   f"{cpt_embeddings.first_description_for_id(cpt_id)}")
-a                pass
+                pass
 
             # Need to check...
 

@@ -9,7 +9,7 @@ spacy_holder = SpacyHolder.build(disable_modules=["tok2vec", "tagger", "parser",
 
 from collections import Counter, defaultdict
 from ml_util.intertools_wrapper import powerset
-from typing import List, FrozenSet, Dict, Iterable, Set, Tuple
+from typing import List, FrozenSet, Dict, Iterable, Set, Tuple, Any
 import numpy as np
 from frozendict import frozendict
 # from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
@@ -25,49 +25,40 @@ logger = give_logger()
 
 class Vocab:
     def __init__(self):
-        self._voc: List[str] = []
+        self._lookup: Dict[str, Any] = {}
 
     def __len__(self):
-        return len(self._voc)
+        return len(self._lookup)
 
     def get_voc_ind(self,
-                    ortho: str) -> int:
+                    item: Any) -> int:
         try:
-            return self._voc.index(ortho)
+            return self._lookup[item]
         except ValueError:
-            ind = len(self._voc)
-            self._voc.append(ortho)
+            ind = len(self._lookup)
+            self._lookup[item] = ind
             return ind
 
-
-class CorpusTracker:
+class InventoryTracker:
     idf_methods = ('smooth', 'double_normalization')
-    def __init__(self,
-                 spacy_holder: SpacyHolder,
-                 *,
-                 stop_list: List[str] = None,
-                 idf_method: str = 'smooth',
-                 match_method: str = 'cosine_similarity',
-                 class_inventory: ClassInventory = None,
-                 ):
+    def __init___(self,
+                  *,
+                  idf_method: str = 'smooth',
+                  match_method: str = 'cosine_similarity',
+                  class_inventory: ClassInventory = None,
+                  ):
         self._class_inventory = class_inventory
         self._match_method = match_method
-        self._spacy_holder = spacy_holder
-        if stop_list is None:
-            stop_list = []
-        self._stop_list = set(stop_list)
-
         assert idf_method in self.idf_methods
         self.idf_method = idf_method
-        # self._vocab: List[str] = []
+
         self._vocab = Vocab()
-        self._unweighted_doc_vecs: List[np.ndarray[int]] = []
+        self._unweighted_entry_vecs: List[coo_array] = []
         self._label_inds: List[int] = []
         self.label_inds: np.ndarray = None
-        self._raw_docs: List[str] = []
         self._unweighted_doc_matrix: coo_matrix = None
         self._idf: np.ndarray[float] = None
-        self._lex_type_weights: np.ndarray[np.float32] = None
+        self._type_weights: np.ndarray[np.float32] = None
         self._trunc_svd_by_dims: Dict = {}
         self._trunc_data_by_dims: Dict = {}
         self._index_by_dims: Dict[int, SearchIndexWrapper] = {}
@@ -76,20 +67,19 @@ class CorpusTracker:
     def unweighted_doc_matrix(self) -> coo_matrix:
         if self._unweighted_doc_matrix is None:
             voc_size = self.voc_size
-            for d in self._unweighted_doc_vecs:
+            for d in self._unweighted_entry_vecs:
                 d.resize((1, voc_size))
-            self._unweighted_doc_matrix = vstack(self._unweighted_doc_vecs)
+            self._unweighted_doc_matrix = vstack(self._unweighted_entry_vecs)
             # logger.info(f"unweighted_doc_matrix: {self._unweighted_doc_matrix.shape} "
             #             f"voc_size: {voc_size}")
             # save space
-            self._unweighted_doc_vecs = None
+            self._unweighted_entry_vecs = None
 
             self.label_inds = np.array(self._label_inds, dtype=np.int32)
             logger.info(f"unweighted_doc_matrix: {self._unweighted_doc_matrix.shape} "
                         f"row max: {self._unweighted_doc_matrix.row.max()} "
                         f"voc_size: {voc_size} label_inds {self.label_inds.shape} "
                         f"unique: {np.unique(self.label_inds).shape[0]}")
-
 
         return self._unweighted_doc_matrix
 
@@ -106,12 +96,12 @@ class CorpusTracker:
         return self._idf
 
     @property
-    def lex_type_weights(self) -> np.ndarray[np.float32]:
+    def type_weights(self) -> np.ndarray[np.float32]:
         from scipy.stats import chi2
 
-        if self._lex_type_weights is None and self._class_inventory is None:
-            self._lex_type_weights = self.idf
-        elif self._lex_type_weights is None and self._class_inventory is not None:
+        if self._type_weights is None and self._class_inventory is None:
+            self._type_weights = self.idf
+        elif self._type_weights is None and self._class_inventory is not None:
             lex_totals = self.unweighted_doc_matrix.todense().sum(axis=0)
             hier_weights: List[np.ndarray[np.float32]] = []
             hier_tf_weights: List[np.ndarray[np.float32]] = []
@@ -157,19 +147,19 @@ class CorpusTracker:
             if USE_TF:
                 top_tf_weights = np.stack(hier_tf_weights).argmax(axis=0)
                 top_coords = np.stack((np.arange(top_tf_weights.shape[0]), top_tf_weights)).T
-                self._lex_type_weights = np.stack(hier_weights).T[top_coords[:, 0], top_coords[:, 1]]
+                self._type_weights = np.stack(hier_weights).T[top_coords[:, 0], top_coords[:, 1]]
             else:
-                self._lex_type_weights = np.stack(hier_weights).max(axis=0)
+                self._type_weights = np.stack(hier_weights).max(axis=0)
 
         p_thresh = 0.001
         hier_chi2_p = np.stack(hier_chi2_p)
         thresh_filter = hier_chi2_p.min(axis=0) <= p_thresh
         thresh_voc = [self._vocab._voc[i] for i in np.argwhere(thresh_filter).squeeze().tolist()]
         lowest_ind = hier_chi2_p.argmin(axis=0)
-        assert self._lex_type_weights is not None
-        assert isinstance(self._lex_type_weights, np.ndarray) and len(self._lex_type_weights.shape) == 1
+        assert self._type_weights is not None
+        assert isinstance(self._type_weights, np.ndarray) and len(self._type_weights.shape) == 1
 
-        return self._lex_type_weights
+        return self._type_weights
 
     @property
     def voc_size(self) -> int:
@@ -183,7 +173,7 @@ class CorpusTracker:
             # get tf/idf (or just idf...)
             # loc_matrix = loc_matrix.multiply(self.idf)
             loc_matrix = (self.unweighted_doc_matrix.todense() > 0).astype(np.float32)
-            loc_matrix = np.multiply(loc_matrix, self.lex_type_weights)
+            loc_matrix = np.multiply(loc_matrix, self.type_weights)
 
             curr = TruncatedSVD(n_components=dims)
             self._trunc_data_by_dims[dims] = curr.fit_transform(loc_matrix).astype(np.float32)
@@ -192,34 +182,74 @@ class CorpusTracker:
 
         return curr
 
-    # def lda_transform(self,
-    #                   docs: str | List[str],
-    #                   *,
-    #                   dims: int = None) -> np.ndarray[float]:
-    #     if dims is None:
-    #         if len(self._trunc_svd_by_dims) == 1:
-    #             dims = self._trunc_svd_by_dims.keys()[0]
-    #         else:
-    #             raise ValueError
-    #
-    #     encoded = self.encode_docs_unnormalized(docs)
-    #     transformed = self._trunc_svd_by_dims[dims].transform(encoded)
-    #
-    #     return transformed
+    def encode_item(self,
+                    counts: List[float],
+                    loc_inds: List[int]):
+        assert max(loc_inds) < self.voc_size
 
-    # def get_voc_ind_and_add(self,
-    #                         ortho: str) -> Tuple[int, bool]:
-    #     try:
-    #         return self._vocab.index(ortho), False
-    #     except ValueError:
-    #         ind = len(self._vocab)
-    #         self._vocab.append(ortho)
-    #         return ind, True
-    #
-    # def get_voc_ind(self,
-    #                 ortho: str) -> int:
-    #     return self.get_voc_ind_and_add(ortho)[0]
-    #
+        counts = np.array(counts)
+        encoded = coo_array((counts,
+                            (np.zeros_like(counts), np.array(loc_inds))),
+                           (1, self.voc_size))
+
+        return encoded
+
+    def add_unweighted_counts(self,
+                              *,
+                              counts: List[float],
+                              loc_inds: List[int],
+                              encoded: coo_array | List[coo_array]):
+        if encoded:
+            if not isinstance(encoded, list):
+                to_add = [encoded]
+            else:
+                to_add = encoded
+        else:
+            to_add = [self.encode_item(counts, loc_inds)]
+        self._unweighted_entry_vecs.extend(to_add)
+
+        return to_add
+
+    def search_items(self,
+                     encoded: List[coo_array],
+                     svd_dims: int,
+                     ) -> Tuple[np.array[float], np.array[int]]:
+        encoded = vstack(encoded).todense().astype(np.float32)
+        weighted = np.multiply(encoded, self.type_weights)
+        if self._match_method in ('cosine_similarity', 'double_normalization'):
+            weighted = weighted.astype(np.float32)
+            faiss.normalize_L2(weighted)
+        trunc_svd = self.get_trunc_svd(svd_dims)
+        transformed = trunc_svd.transform(weighted).astype(np.float32)
+
+        # Need to search with faiss!!!
+        distances, indices = self._index_by_dims[svd_dims].search(transformed)
+
+        return distances, indices
+
+
+class CorpusTracker(InventoryTracker):
+    def __init__(self,
+                 spacy_holder: SpacyHolder,
+                 *,
+                 stop_list: List[str] = None,
+                 idf_method: str = 'smooth',
+                 match_method: str = 'cosine_similarity',
+                 class_inventory: ClassInventory = None,
+                 ):
+        super().__init__(idf_method=idf_method,
+                         match_method=match_method,
+                         class_inventory=class_inventory)
+        self._spacy_holder = spacy_holder
+        if stop_list is None:
+            stop_list = []
+        self._stop_list = set(stop_list)
+        self._raw_docs: List[str] = []
+
+    @property
+    def lex_type_weights(self) -> np.ndarray[np.float32]:
+        return self.type_weights
+
     def _prep_docs(self,
                    raw_docs: str | List[str]):
         if isinstance(raw_docs, str):
@@ -236,13 +266,15 @@ class CorpusTracker:
         return prepped_docs
 
     def encode_docs_unweighted(self,
-                               raw_docs: str | List[str]) -> List[np.ndarray[float]]:
+                               raw_docs: str | List[str],
+                               ) -> List[coo_array]:
         docs = self._prep_docs(raw_docs)
 
         if isinstance(docs, str):
             docs = [docs]
 
-        def get_doc_array(doc) -> np.ndarray[int]:
+        out = []
+        for doc in docs:
             tok_tallies = Counter(doc.strip().split())
             cnts = []
             loc_inds = []
@@ -250,25 +282,21 @@ class CorpusTracker:
                 if k not in self._stop_list:
                     loc_inds.append(self._vocab.get_voc_ind(k))
                     cnts.append(v)
-            cnts = np.array(cnts)
-            return coo_array((cnts,
-                              (np.zeros_like(cnts), np.array(loc_inds))),
-                             (1, self.voc_size))
+            encoded = self.encode_item(cnts, loc_inds)
+            out.append(encoded)
 
-        return [get_doc_array(d) for d in docs]
+        return out
 
     def add_docs(self,
                  docs: List[str],
                  label_inds: List[int],
                  ):
-        if self._unweighted_doc_vecs is None:
+        if self._unweighted_entry_vecs is None:
             raise NotImplementedError
 
         self._raw_docs.extend(docs)
 
-        self._unweighted_doc_vecs.extend(
-            self.encode_docs_unweighted(docs)
-        )
+        self.add_unweighted_counts(encoded=self.encode_docs_unweighted(docs))
         self._label_inds.extend(label_inds)
 
     def search_docs(self,
@@ -276,16 +304,8 @@ class CorpusTracker:
                     svd_dims: int = 30,
                     ):
         logger.info(f"voc_size: {self.voc_size}")
-        encoded = vstack(self.encode_docs_unweighted(docs)).todense().astype(np.float32)
-        weighted = np.multiply(encoded, self.lex_type_weights)
-        if self._match_method in ('cosine_similarity', 'double_normalization'):
-            weighted = weighted.astype(np.float32)
-            faiss.normalize_L2(weighted)
-        trunc_svd = self.get_trunc_svd(svd_dims)
-        transformed = trunc_svd.transform(weighted).astype(np.float32)
-
-        # Need to search with faiss!!!
-        distances, indices = self._index_by_dims[svd_dims].search(transformed)
+        encoded = self.encode_docs_unweighted(docs)
+        distances, indices = self.search_items(encoded, svd_dims)
 
         top_n = 10
         for doc, dist, inds in zip(docs, distances, indices):
