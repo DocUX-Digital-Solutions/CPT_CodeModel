@@ -46,11 +46,13 @@ class InventoryTracker:
                   idf_method: str = 'smooth',
                   match_method: str = 'cosine_similarity',
                   class_inventory: ClassInventory = None,
+                  use_tf: bool = False,
                   ):
         self._class_inventory = class_inventory
         self._match_method = match_method
         assert idf_method in self.idf_methods
         self.idf_method = idf_method
+        self.use_tf = use_tf
 
         self._vocab = Vocab()
         self._unweighted_entry_vecs: List[coo_array] = []
@@ -95,69 +97,71 @@ class InventoryTracker:
 
         return self._idf
 
-    @property
-    def type_weights(self) -> np.ndarray[np.float32]:
+    def _get_chi_type_weights(self):
         from scipy.stats import chi2
 
-        if self._type_weights is None and self._class_inventory is None:
-            self._type_weights = self.idf
-        elif self._type_weights is None and self._class_inventory is not None:
-            lex_totals = self.unweighted_doc_matrix.todense().sum(axis=0)
-            hier_weights: List[np.ndarray[np.float32]] = []
-            hier_tf_weights: List[np.ndarray[np.float32]] = []
-            hier_chi2_p : List[np.ndarray[np.float32]] = []
-            for cs in self._class_inventory.hierarchical_segmentations:
-                USE_TF = False
-                expected = np.outer((cs.counts / cs.counts.sum()).numpy(), lex_totals)
-                logger.info(f"cs len: {cs.label_length}")
-                mapped_down: coo_matrix = self.unweighted_doc_matrix.copy()
-                logger.info(f"label_inds: {self.label_inds.shape} self.unweighted_doc_matrix.row.max(): {self.unweighted_doc_matrix.row.max()}")
-                try:
-                    # Need to deal with mapping to codes
-                    mapped_down.row = cs.inverse[self.label_inds[self.unweighted_doc_matrix.row]]
-                except:
-                    raise
-                row_cnt = mapped_down.row.max() + 1
-                if  row_cnt < 2:
-                    continue
-                # How about chi-square?
-                if self.idf_method == 'double_normalization':
-                    # todense forces summation for shared cells.
-                    mapped_down = mapped_down.todense()[:row_cnt]
-                    z = np.sum(np.power(mapped_down - expected, 2) / expected, axis=0)
-                    hier_chi2_p.append(
-                        chi2.sf(z, -1 + row_cnt)
-                    )
-                    # Normalize counts by the number of "documents" for each class.
-                    mapped_down_tf = (mapped_down /
-                          np.expand_dims(cs.counts, 1).repeat(mapped_down.shape[1], axis=1))
-                    # mapped_down_tf =  1 + np.log(mapped_down_tf)
-                    # Need to redistribute over the data points
-                    mapped_down_idf = np.log(cs.size / (mapped_down_tf > 0).sum(axis=0))
-                    weights = mapped_down_idf
-                    if USE_TF:
-                        tf_weights = (mapped_down_tf * mapped_down_idf).max(axis=0)
-                else:
-                    raise NotImplementedError
-
-                hier_weights.append(weights)
-                if USE_TF:
-                    hier_tf_weights.append(tf_weights)
-
-            if USE_TF:
-                top_tf_weights = np.stack(hier_tf_weights).argmax(axis=0)
-                top_coords = np.stack((np.arange(top_tf_weights.shape[0]), top_tf_weights)).T
-                self._type_weights = np.stack(hier_weights).T[top_coords[:, 0], top_coords[:, 1]]
+        lex_totals = self.unweighted_doc_matrix.todense().sum(axis=0)
+        hier_weights: List[np.ndarray[np.float32]] = []
+        hier_tf_weights: List[np.ndarray[np.float32]] = []
+        hier_chi2_p: List[np.ndarray[np.float32]] = []
+        for cs in self._class_inventory.hierarchical_segmentations:
+            expected = np.outer((cs.counts / cs.counts.sum()).numpy(), lex_totals)
+            logger.info(f"cs len: {cs.label_length}")
+            mapped_down: coo_matrix = self.unweighted_doc_matrix.copy()
+            logger.info(
+                f"label_inds: {self.label_inds.shape} self.unweighted_doc_matrix.row.max(): {self.unweighted_doc_matrix.row.max()}")
+            mapped_down.row = cs.inverse[self.label_inds[self.unweighted_doc_matrix.row]]
+            row_cnt = mapped_down.row.max() + 1
+            if row_cnt < 2:
+                continue
+            if self.idf_method == 'double_normalization':
+                # todense forces summation for shared cells.
+                mapped_down = mapped_down.todense()[:row_cnt]
+                z = np.sum(np.power(mapped_down - expected, 2) / expected, axis=0)
+                hier_chi2_p.append(
+                    chi2.sf(z, -1 + row_cnt)
+                )
+                # Normalize counts by the number of "documents" for each class.
+                mapped_down_tf = (mapped_down /
+                                  np.expand_dims(cs.counts, 1).repeat(mapped_down.shape[1], axis=1))
+                # mapped_down_tf =  1 + np.log(mapped_down_tf)
+                # Need to redistribute over the data points
+                mapped_down_idf = np.log(cs.size / (mapped_down_tf > 0).sum(axis=0))
+                weights = mapped_down_idf
+                if self.use_tf:
+                    tf_weights = (mapped_down_tf * mapped_down_idf).max(axis=0)
             else:
-                self._type_weights = np.stack(hier_weights).max(axis=0)
+                raise NotImplementedError
+
+            hier_weights.append(weights)
+            if self.use_tf:
+                hier_tf_weights.append(tf_weights)
+
+        if self.use_tf:
+            top_tf_weights = np.stack(hier_tf_weights).argmax(axis=0)
+            top_coords = np.stack((np.arange(top_tf_weights.shape[0]), top_tf_weights)).T
+            type_weights = np.stack(hier_weights).T[top_coords[:, 0], top_coords[:, 1]]
+        else:
+            type_weights = np.stack(hier_weights).max(axis=0)
 
         p_thresh = 0.001
         hier_chi2_p = np.stack(hier_chi2_p)
         thresh_filter = hier_chi2_p.min(axis=0) <= p_thresh
         thresh_voc = [self._vocab._voc[i] for i in np.argwhere(thresh_filter).squeeze().tolist()]
         lowest_ind = hier_chi2_p.argmin(axis=0)
-        assert self._type_weights is not None
-        assert isinstance(self._type_weights, np.ndarray) and len(self._type_weights.shape) == 1
+        assert type_weights is not None
+        assert isinstance(type_weights, np.ndarray) and len(type_weights.shape) == 1
+
+        return type_weights
+
+    @property
+    def type_weights(self) -> np.ndarray[np.float32]:
+        if self._type_weights is None:
+            if self._class_inventory is None:
+                self._type_weights = self.idf
+            else:
+                if self.idf_method in {'double_normalization'}:
+                    self._type_weights = self._get_chi_type_weights()
 
         return self._type_weights
 
