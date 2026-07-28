@@ -25,7 +25,8 @@ logger = give_logger()
 
 class Vocab:
     def __init__(self):
-        self._lookup: Dict[str, Any] = {}
+        self._items: Dict[str, Any] = {}
+        self._lookup: List[str] = []
 
     def __len__(self):
         return len(self._lookup)
@@ -33,21 +34,25 @@ class Vocab:
     def get_voc_ind(self,
                     item: Any) -> int:
         try:
-            return self._lookup[item]
-        except ValueError:
+            return self._items[item]
+        except KeyError:
             ind = len(self._lookup)
-            self._lookup[item] = ind
+            self._items[item] = ind
+            self._lookup.append(item)
+
             return ind
+
 
 class InventoryTracker:
     idf_methods = ('smooth', 'double_normalization')
-    def __init___(self,
-                  *,
-                  idf_method: str = 'smooth',
-                  match_method: str = 'cosine_similarity',
-                  class_inventory: ClassInventory = None,
-                  use_tf: bool = False,
-                  ):
+
+    def __init__(self,
+                 *,
+                 idf_method: str = 'smooth',
+                 match_method: str = 'cosine_similarity',
+                 class_inventory: ClassInventory = None,
+                 use_tf: bool = False,
+                 ):
         self._class_inventory = class_inventory
         self._match_method = match_method
         assert idf_method in self.idf_methods
@@ -106,14 +111,14 @@ class InventoryTracker:
         hier_chi2_p: List[np.ndarray[np.float32]] = []
         for cs in self._class_inventory.hierarchical_segmentations:
             expected = np.outer((cs.counts / cs.counts.sum()).numpy(), lex_totals)
-            logger.info(f"cs len: {cs.label_length}")
+            # logger.info(f"cs len: {cs.label_length}")
             mapped_down: coo_matrix = self.unweighted_doc_matrix.copy()
-            logger.info(
-                f"label_inds: {self.label_inds.shape} self.unweighted_doc_matrix.row.max(): {self.unweighted_doc_matrix.row.max()}")
+            # logger.info(
+            #     f"label_inds: {self.label_inds.shape} self.unweighted_doc_matrix.row.max(): {self.unweighted_doc_matrix.row.max()}")
             mapped_down.row = cs.inverse[self.label_inds[self.unweighted_doc_matrix.row]]
             row_cnt = mapped_down.row.max() + 1
             if row_cnt < 2:
-                continue
+                continue # No contrast
             if self.idf_method == 'double_normalization':
                 # todense forces summation for shared cells.
                 mapped_down = mapped_down.todense()[:row_cnt]
@@ -138,17 +143,25 @@ class InventoryTracker:
                 hier_tf_weights.append(tf_weights)
 
         if self.use_tf:
+            raise NotImplementedError
+            # This needs to be fixed...
             top_tf_weights = np.stack(hier_tf_weights).argmax(axis=0)
             top_coords = np.stack((np.arange(top_tf_weights.shape[0]), top_tf_weights)).T
             type_weights = np.stack(hier_weights).T[top_coords[:, 0], top_coords[:, 1]]
         else:
-            type_weights = np.stack(hier_weights).max(axis=0)
+            type_weights = np.stack(hier_weights)
 
-        p_thresh = 0.001
-        hier_chi2_p = np.stack(hier_chi2_p)
-        thresh_filter = hier_chi2_p.min(axis=0) <= p_thresh
-        thresh_voc = [self._vocab._voc[i] for i in np.argwhere(thresh_filter).squeeze().tolist()]
-        lowest_ind = hier_chi2_p.argmin(axis=0)
+
+        p_thresh = 0.0001
+        hier_chi2_p = np.stack(hier_chi2_p).T
+        thresh_filter = hier_chi2_p <= p_thresh
+        use_index = thresh_filter.argmin(axis=1)
+        # use the highest-resolution counts if none are significant
+        miss_inds = np.argwhere(~thresh_filter.any(axis=1)).flatten()
+        use_index[miss_inds] = hier_chi2_p[miss_inds].argmin(axis=1)
+        # thresh_voc = [self._vocab._voc[i] for i in np.argwhere(thresh_filter).squeeze().tolist()]
+        # lowest_ind = hier_chi2_p.argmin(axis=0)
+        type_weights = type_weights[use_index, np.arange(use_index.shape[0])]
         assert type_weights is not None
         assert isinstance(type_weights, np.ndarray) and len(type_weights.shape) == 1
 
@@ -189,7 +202,7 @@ class InventoryTracker:
     def encode_item(self,
                     counts: List[float],
                     loc_inds: List[int]):
-        assert max(loc_inds) < self.voc_size
+        assert len(loc_inds) < 1 or max(loc_inds) < self.voc_size
 
         counts = np.array(counts)
         encoded = coo_array((counts,
@@ -200,8 +213,8 @@ class InventoryTracker:
 
     def add_unweighted_counts(self,
                               *,
-                              counts: List[float],
-                              loc_inds: List[int],
+                              counts: List[float] = None,
+                              loc_inds: List[int] = None,
                               encoded: coo_array | List[coo_array]):
         if encoded:
             if not isinstance(encoded, list):
@@ -217,7 +230,7 @@ class InventoryTracker:
     def search_items(self,
                      encoded: List[coo_array],
                      svd_dims: int,
-                     ) -> Tuple[np.array[float], np.array[int]]:
+                     ) -> Tuple[np.ndarray[float], np.ndarray[int]]:
         encoded = vstack(encoded).todense().astype(np.float32)
         weighted = np.multiply(encoded, self.type_weights)
         if self._match_method in ('cosine_similarity', 'double_normalization'):
@@ -315,7 +328,7 @@ class CorpusTracker(InventoryTracker):
         for doc, dist, inds in zip(docs, distances, indices):
             logger.info(f"doc: {doc}")
             for n in range(top_n):
-                logger.info(f"{n}\t{dist[n]:.4f}\n{self._raw_docs[inds[n]]}")
+                logger.info(f"{n}\t{dist[n]:.4f}\t{self._raw_docs[inds[n]]}")
 
 def main():
     import argparse
@@ -360,7 +373,7 @@ def main():
 
     toy = ["rotator cuff repair", "femur fracture", "rotator cuff arthroscopy", "rotator cuff"]
 
-    tracker.search_docs(toy, svd_dims=300)
+    tracker.search_docs(toy, svd_dims=2000)
 
 
 if __name__ == "__main__":
