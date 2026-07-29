@@ -74,6 +74,8 @@ class InventoryTracker:
     def unweighted_doc_matrix(self) -> coo_matrix:
         if self._unweighted_doc_matrix is None:
             voc_size = self.voc_size
+            if len(self._label_inds) != len(self._unweighted_entry_vecs):
+                raise ValueError
             for d in self._unweighted_entry_vecs:
                 d.resize((1, voc_size))
             self._unweighted_doc_matrix = vstack(self._unweighted_entry_vecs)
@@ -215,8 +217,8 @@ class InventoryTracker:
                               *,
                               counts: List[float] = None,
                               loc_inds: List[int] = None,
-                              encoded: coo_array | List[coo_array]):
-        if encoded:
+                              encoded: None | coo_array | List[coo_array]):
+        if encoded is not None:
             if not isinstance(encoded, list):
                 to_add = [encoded]
             else:

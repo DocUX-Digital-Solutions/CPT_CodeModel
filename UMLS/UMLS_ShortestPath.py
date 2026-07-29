@@ -70,6 +70,7 @@ import networkit as nk
 from typing import List, Dict, FrozenSet, Tuple, Set
 
 from ml_util.network_interface import GraphHolder
+from scripts.LSI_complete import InventoryTracker
 
 csv.field_size_limit(sys.maxsize)
 
@@ -136,7 +137,7 @@ class EdgeWithData:
     def create(cls,
                first_cui: str,
                second_cui: str,
-               all_edge_data,
+               all_edge_data: List,
                ):
         if 0 in all_edge_data:
             all_data = frozenset([DataForEdge(**v)
@@ -144,7 +145,7 @@ class EdgeWithData:
                                   sorted(all_edge_data.items())
                                   ])
         else:
-            all_data = frozenset([DataForEdge(**all_edge_data)])
+            all_data = frozenset([DataForEdge(**ed) for ed in all_edge_data])
 
         return cls(first_cui, second_cui, all_data)
 
@@ -450,21 +451,23 @@ class UMLSCache:
 
     def get_edges_with_data(self,
                             cui) -> List[EdgeWithData]:
-        return [EdgeWithData.create(*p, self.graph.get_edge_data(*p))
-                for p in self.graph.edges(cui)]
+        return [EdgeWithData.create(cui, p, self.graph_holder.get_edge_data(cui, p))
+                for p in self.graph_holder.give_neighbors(cui)]
 
     def give_rel_and_rela_matches(self,
                                   cui: str,
                                   rel: None | str,
                                   rela: None | str,
                                   *,
-                                  edges: List[EdgeWithData] = None) -> List[EdgeWithData]:
+                                  edges: List[EdgeWithData] = None) -> Iterable[EdgeWithData]:
         if edges is None:
             edges = self.get_edges_with_data(cui)
 
         all_v = [None if r is None else {r} for r in (rel, rela)]
-        return [e
-                for e in edges if e.has_rel_and_rela(*all_v)]
+        for e in edges:
+            if e.has_rel_and_rela(*all_v):
+                yield e
+
 
     def mine_rel(self,
                  cui: str,
@@ -591,6 +594,19 @@ class UMLSCache:
             "node_positions": overlap["node_positions"],
             "has_overlap": overlap["has_overlap"],
         }
+
+class UMLS_Tracker(InventoryTracker):
+    def add_entry(self,
+                  entry_ind: int,
+                  count_dict: Dict[str, float]):
+        lex_inds = []
+        cnts = []
+        for k, v in count_dict.items():
+            voc_ind = self._vocab.get_voc_ind(k)
+            lex_inds.append(voc_ind)
+            cnts.append(v)
+        self.add_unweighted_counts(encoded=self.encode_item(cnts, lex_inds))
+        self._label_inds.append(entry_ind)
 
 
 # --------------------------------------------------------------------------
