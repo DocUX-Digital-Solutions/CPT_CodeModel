@@ -67,7 +67,7 @@ from pathlib import Path
 import networkx as nx
 import networkit as nk
 
-from typing import List, Dict, FrozenSet, Tuple, Set
+from typing import List, Dict, FrozenSet, Tuple, Set, Iterable
 
 from ml_util.network_interface import GraphHolder
 from scripts.LSI_complete import InventoryTracker
@@ -107,6 +107,13 @@ class EdgeWithData:
     second_cui: str
     all_data: FrozenSet[DataForEdge]
 
+    def by_rel(self) -> Dict[str, List[DataForEdge]]:
+        out = defaultdict(list)
+        for e in self.all_data:
+            out[e.rel].append(e)
+
+        return dict(out)
+
     def has_rel(self,
                 rels: Set):
         assert isinstance(rels, set)
@@ -118,8 +125,8 @@ class EdgeWithData:
         return any([d.rela in relas for d in self.all_data])
 
     def data_with_rel_and_rela(self,
-                         rels: None | Set,
-                         relas: None | Set):
+                               rels: None | Set,
+                               relas: None | Set):
         all_r = [rels, relas]
         assert all([r is None or isinstance(r, set) for r in all_r])
         assert sum([r is not None for r in all_r]) > 0
@@ -132,6 +139,13 @@ class EdgeWithData:
                          rels: None | Set,
                          relas: None | Set) -> bool:
         return len(self.data_with_rel_and_rela(rels, relas)) > 0
+
+    def matches_data_rel(self,
+                         data_rel: DataRels | None):
+        if data_rel is None:
+            return True
+        as_set = lambda x: None if x is None else {x}
+        return len(self.data_with_rel_and_rela(as_set(data_rel.rel), as_set(data_rel.rela))) > 0
 
     @classmethod
     def create(cls,
@@ -162,6 +176,13 @@ class UMLSCache:
     cpt_root_cuis = {'Current Procedural Terminology': 'C1138431'}
     snomed_sab = 'SNOMEDCT_US'
 
+    acceptable_specs = {'PAR': (DataRels('PAR', 'inverse_isa'), DataRels('PAR', 'inverse_isa')),
+                        'CHD': (DataRels('CHD', 'isa'), DataRels('CHD', 'isa')),
+                        'RB': (DataRels('RB', None), DataRels('PAR', 'inverse_isa')),
+                        'RN': (DataRels('RN', None), DataRels('CHD', 'isa')),
+                        'RO': (DataRels('RO', None), DataRels('PAR', 'inverse_isa'))
+                        }
+
     def __init__(self,
                  graph_holder: GraphHolder,
                  cui_to_terms,
@@ -170,6 +191,7 @@ class UMLSCache:
                  sab_for_cui,
                  cui_to_stn):
         self.graph_holder = graph_holder
+        self._member_list = self.graph_holder._node_names.member_list
         self.cui_to_terms = cui_to_terms
         self.cui_to_preferred_term = cui_to_preferred_term
         self.code_to_cui = code_to_cui
@@ -379,7 +401,7 @@ class UMLSCache:
 
                 # Keep the most specific relationship label available on the edge.
                 if not G.use_networkkit and G.has_edge(cui1, cui2):
-                    prev = G.get_edge_data(cui1, cui2)
+                    prev = G.get_edge_data_from_names(cui1, cui2)
                     if {'rel': rel, 'rela': rela, 'sab': sab} in prev.values():
                         continue
                 G.add_edge(cui1, cui2, rel=rel, rela=rela, sab=sab)
@@ -436,7 +458,7 @@ class UMLSCache:
         """
         edges = []
         for cui1, cui2 in zip(cui_path, cui_path[1:]):
-            data = self.graph.get_edge_data(cui1, cui2) or {}
+            data = self.graph.get_edge_data_from_names(cui1, cui2) or {}
             if 0 in data:
                 # Just take the first description of the link.
                 data = data[0]
@@ -451,7 +473,7 @@ class UMLSCache:
 
     def get_edges_with_data(self,
                             cui) -> List[EdgeWithData]:
-        return [EdgeWithData.create(cui, p, self.graph_holder.get_edge_data(cui, p))
+        return [EdgeWithData.create(cui, p, self.graph_holder.get_edge_data_from_names(cui, p))
                 for p in self.graph_holder.give_neighbors(cui)]
 
     def give_rel_and_rela_matches(self,
@@ -505,7 +527,81 @@ class UMLSCache:
 
         return out
 
+    def give_path_with_data(self,
+                            source: int,
+                            target: int,
+                            path: Tuple[int]) -> Tuple[EdgeWithData, ...]:
+        full_path = [source] + list(path) + [target]
+        full_name_path = [self._member_list[i] for i in full_path]
+        return tuple([EdgeWithData.create(f_name, s_name, self.graph_holder.get_edge_data(f, s))
+                      for f, s, f_name, s_name in zip(full_path, full_path[1:], full_name_path, full_name_path[1:])])
+
     def get_features(self,
+                     cui: str,
+                     *,
+                     descendant_depth: int = 3) -> Tuple[str, FrozenSet[Tuple], Dict]:
+        # neighbors = self.graph_holder.give_neighbors(cui)
+        # n_data = [self.graph_holder.get_edge_data_from_names(cui, n) for n in neighbors]
+        cui_ind = self.graph_holder.get_ind_for_name(cui)
+        # n_ind_data = [self.graph_holder.get_edge_data(cui_ind, self.graph_holder.get_ind_for_name(n)) for n in neighbors]
+        immediate_paths: Set = set([])
+        distant_descendants: Dict[str, Dict] = defaultdict(dict)
+
+        bad_paths = set([])
+        def is_bad(p):
+            for e in range(1 + len(p)):
+                if p[:e] in bad_paths:
+                    return True
+            return False
+        # Could make parallel...
+        for rel_cui_ind, raw_ind_path in self.graph_holder.give_relatives(cui_ind, descendant_depth):
+            concat = raw_ind_path + tuple([rel_cui_ind])
+            if is_bad(concat):
+                continue
+            path: Tuple[EdgeWithData, ...] = self.give_path_with_data(cui_ind, rel_cui_ind, raw_ind_path)
+            if len(path) <= 1:
+                r = self.rep_for_immediate(path[0])
+                if r:
+                    immediate_paths.add(r)
+                else:
+                    bad_paths.add(concat)
+            else:
+                if self.acceptable_feature_path(path):
+                    distant_descendants[path[0].second_cui][path[-1].second_cui] = len(path)
+                else:
+                    bad_paths.add(concat)
+
+        return cui, frozenset(immediate_paths), dict(distant_descendants)
+
+    @staticmethod
+    def acceptable_feature_path(path: Iterable[EdgeWithData]) -> bool:
+        if len(path) <= 1:
+            # This feature should be immediate!
+            return False
+        for rel, all_data in path[0].by_rel().items():
+            use_spec = UMLSCache.acceptable_specs.get(rel)
+            if use_spec:
+                if path[0].matches_data_rel(use_spec[0]) and all([p.matches_data_rel(use_spec[1]) for p in path[1:]]):
+                    return True
+
+        return False
+
+    @staticmethod
+    def edge_data_matches_immediate(d: DataForEdge) -> bool:
+        return d.rel in {'PAR', 'CHD', 'RB', 'RN'} or \
+            (d.rel in {'RO'} and d.rela not in {
+                'clinician_form_of', 'has_clinician_form', 'has_consumer_friendly_form',
+                'do_not_code_with', 'has_add_on_code', 'specialty_of', 'has_specialty', 'add_on_code_for',
+                'consumer_friendly_form_of'
+            })
+
+    def rep_for_immediate(self, l: EdgeWithData) -> None | Tuple[str, str, str]:
+        for d in l.all_data:
+            if self.edge_data_matches_immediate(d):
+                return d.rel, d.rela, l.second_cui
+        return None
+
+    def OLD_get_features(self,
                      cui: str,
                      *,
                      descendant_depth: int = 3) -> Tuple[str, FrozenSet[Tuple], Dict]:
@@ -518,16 +614,9 @@ class UMLSCache:
                 # loc_cui = loc_edges[0].second_cui
                 # loc_edges = self.get_edges_with_data(loc_cui)
 
-            loc_out = frozenset([
-                (d.rel, d.rela, l.second_cui)
-                for l in loc_edges
-                for d in l.all_data
-                if d.rel in {'PAR', 'CHD', 'RB', 'RN'} or
-                   (d.rel in {'RO'} and d.rela not in {
-                       'clinician_form_of', 'has_clinician_form', 'has_consumer_friendly_form',
-                       'do_not_code_with', 'has_add_on_code', 'specialty_of', 'has_specialty', 'add_on_code_for',
-                       'consumer_friendly_form_of'
-                   })])
+            loc_out = frozenset([r for r in
+                                 [self.rep_for_immediate(l) for l in loc_edges]
+                                 if r])
             return loc_out, loc_edges, loc_cui
 
         out, edges, cui = get_set(edges, cui)
@@ -537,7 +626,7 @@ class UMLSCache:
                          (DataRels('CHD', 'isa'), None),
                          (DataRels('RB', None), DataRels('PAR', 'inverse_isa')),
                          (DataRels('RN', None), DataRels('CHD', 'isa')),
-                         (DataRels('RO', None), DataRels('PAR', 'inverse_isa')),
+                         (DataRels('RO', None), DataRels('PAR', 'inverse_isa')), # ?? Should include?
                          # (DataRels('RO', 'procedure_site_of'), DataRels('CHD', 'isa'))
                          ):
             all_rel.update(
@@ -607,6 +696,9 @@ class UMLS_Tracker(InventoryTracker):
             cnts.append(v)
         self.add_unweighted_counts(encoded=self.encode_item(cnts, lex_inds))
         self._label_inds.append(entry_ind)
+        l = len(self._label_inds)
+        if l % 10 == 0:
+            print(f"l: {l}")
 
 
 # --------------------------------------------------------------------------
