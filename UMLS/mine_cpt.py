@@ -1,7 +1,8 @@
 import argparse
 from UMLS.UMLS_ShortestPath import UMLSCache, UMLS_Tracker
 from ml_util.cpt_holder import get_raw_code_table, ClassInventory
-from ml_util.multi import multi_thread_cpu_map, multi_thread_cpu_iter
+from ml_util.multi import multi_thread_cpu_map, multi_thread_cpu_iter, multi_cpu_iter_global
+
 
 import cProfile, pstats
 
@@ -23,29 +24,53 @@ def main():
                                             name="CPT Inventory",
                                             max_similarity=3)
 
-    umls_cache = UMLSCache.load(umls_cache_dir)
+    # umls_cache = UMLSCache.load(umls_cache_dir)
 
     umls_tracker = UMLS_Tracker(class_inventory=code_inventory, idf_method='double_normalization')
 
-    for m_ind, o in enumerate(multi_thread_cpu_iter(work_cpt, [[m for m in code_inventory.members]],
-                                                    constant_args=[umls_cache, args.descendant_depth],
-                                                    num_per_cpu=2)):
-        # with cProfile.Profile() as pr:
-        #     for m_ind, m in enumerate(code_inventory.members):
-        #         o = work_cpt(umls_cache, args.descendant_depth, m)
-        if o is None:
-            continue
-        umls_tracker.add_entry(*o)
-        if m_ind % 100 == 0:
-            print(f"m_ind: {m_ind}")
-            # stats = pstats.Stats(pr)
-            # stats.sort_stats(pstats.SortKey.CUMULATIVE).print_stats(10)  # Prints top 10 bottlenecks
+    # with cProfile.Profile() as pr:
+    if True:
+        # for m_ind, o in enumerate(multi_thread_cpu_iter(work_cpt, [list(code_inventory.members)],
+        #                                                 constant_args=[umls_cache, args.descendant_depth],
+    #                                                 num_per_cpu=1)):
+        for m_ind, o in enumerate(multi_cpu_iter_global(work_cpt,
+                                                        local_arg_list=[list(code_inventory.members)],
+                                                        global_init_method=init_cpt_worker,
+                                                        init_args=[umls_cache_dir, args.descendant_depth],
+                                                        num_per_cpu=1,
+                                                        max_workers=2)):
+            # for m_ind, m in enumerate(code_inventory.members):
+            # o = work_cpt(args.descendant_depth, m)
+            if o is None:
+                continue
+            umls_tracker.add_entry(*o)
+            if m_ind % 10 == 0:
+                print(f"m_ind: {m_ind}")
+                # stats = pstats.Stats(pr)
+                # stats.sort_stats(pstats.SortKey.CUMULATIVE).print_stats(10)  # Prints top 10 bottlenecks
 
     type_weights = umls_tracker.type_weights
     pass
 
+
 from collections import defaultdict
-def work_cpt(umls_cache, descendant_depth, member):
+
+from ml_util.multi import _global_context
+
+
+def init_cpt_worker(cache_dir, descendant_depth):
+    umls_cache = UMLSCache.load(cache_dir)
+
+    return umls_cache, descendant_depth
+
+
+def work_cpt(member):
+    global _global_context
+
+    if _global_context is None:
+        raise RuntimeError("Worker process graph context was not initialized properly.")
+    umls_cache, descendant_depth = _global_context
+
     cpt_cuis = umls_cache.code_to_cui.get(member.label)
     if not cpt_cuis:
         print(f"Missing: cpt: {member.label}")

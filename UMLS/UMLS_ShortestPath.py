@@ -192,6 +192,7 @@ class UMLSCache:
                  cui_to_stn):
         self.graph_holder = graph_holder
         self._member_list = self.graph_holder._node_names.member_list
+        self._member_lookup = self.graph_holder._node_names.member_dict
         self.cui_to_terms = cui_to_terms
         self.cui_to_preferred_term = cui_to_preferred_term
         self.code_to_cui = code_to_cui
@@ -206,7 +207,7 @@ class UMLSCache:
     # ----------------------------------------------------------------
 
     @classmethod
-    def build(cls, mrconso_path, mrrel_path, mrsty_path, cache_dir, languages=None, sabs=None, code_sabs=None):
+    def build(cls, mrconso_path, mrrel_path, mrsty_path, cache_dir, languages=None, sabs=None):
         """
         Parse MRCONSO.RRF and MRREL.RRF, write the resulting graph and
         lookup tables to cache_dir, and return a ready-to-use UMLSCache.
@@ -216,7 +217,7 @@ class UMLSCache:
               None = keep all vocabularies.
         """
         term_to_cuis, cui_to_preferred_term, code_to_cui, sab_for_cui = cls._build_term_lookup(
-            mrconso_path, languages=languages, sabs=sabs, code_sabs=code_sabs,
+            mrconso_path, languages=languages, sabs=sabs,
         )
 
         valid_cuis = set(cui_to_preferred_term.keys())
@@ -308,7 +309,7 @@ class UMLSCache:
         return cui_to_stn
 
     @staticmethod
-    def _build_term_lookup(mrconso_path, languages=None, sabs=None, code_sabs=None):
+    def _build_term_lookup(mrconso_path, languages=None, sabs=None):
         """
         Parse MRCONSO.RRF into:
           - term_to_cuis: lowercase string -> set of CUIs
@@ -316,10 +317,6 @@ class UMLSCache:
         """
         languages = set(languages) if languages else None
         sabs = set(sabs) if sabs else None
-        code_sabs = set(code_sabs) if code_sabs else None
-        if code_sabs:
-            if sabs is None or len(sabs.intersection(code_sabs)) < len(code_sabs):
-                raise ValueError(f"All code_sab values must be included in sabs!")
 
         cui_to_terms = defaultdict(set)
         cui_to_preferred_term = {}
@@ -341,7 +338,6 @@ class UMLSCache:
                     continue
                 if sabs and sab not in sabs:
                     continue
-                # if len(code) > 0 and sab in code_sabs and ts == "P" and ispref == "Y":
                 if sab in {'CPT'}:
                     code_to_cui[code].add(cui)
                 sab_for_cui[cui].add(sab)
@@ -528,11 +524,19 @@ class UMLSCache:
         return out
 
     def give_path_with_data(self,
-                            source: int,
-                            target: int,
-                            path: Tuple[int]) -> Tuple[EdgeWithData, ...]:
+                            source: int | str,
+                            target: int | str,
+                            path: Tuple[int] | Tuple[str],
+                            *,
+                            reverse: bool = False) -> Tuple[EdgeWithData, ...]:
         full_path = [source] + list(path) + [target]
-        full_name_path = [self._member_list[i] for i in full_path]
+        if reverse:
+            full_path = full_path[::-1]
+        if isinstance(source, int):
+            full_name_path = [self._member_list[i] for i in full_path]
+        elif isinstance(source, str):
+            full_name_path = full_path[:]
+            full_path = [self._member_lookup[n] for n in full_name_path]
         return tuple([EdgeWithData.create(f_name, s_name, self.graph_holder.get_edge_data(f, s))
                       for f, s, f_name, s_name in zip(full_path, full_path[1:], full_name_path, full_name_path[1:])])
 
@@ -573,6 +577,13 @@ class UMLSCache:
 
         return cui, frozenset(immediate_paths), dict(distant_descendants)
 
+    def show_path(self,
+                  edges: List[EdgeWithData]) -> str:
+        out = "\n".join([f"{edges[0].first_cui} '{self.cui_to_preferred_term[edges[0].first_cui]}'"] +
+                        [f"\t{e.second_cui} '{self.cui_to_preferred_term[e.second_cui]}'\t{e.all_data}"
+                         for e in edges])
+        return out
+
     @staticmethod
     def acceptable_feature_path(path: Iterable[EdgeWithData]) -> bool:
         if len(path) <= 1:
@@ -585,6 +596,48 @@ class UMLSCache:
                     return True
 
         return False
+
+    @staticmethod
+    def secondary_okay_path(path: Iterable[EdgeWithData]) -> bool:
+        all_rel = set([d.rel
+                   for e in path
+                   for d in  e.all_data])
+        # No reverse direction
+        if any([v in all_rel for v in {'PAR', 'RB'}]) and any([v in all_rel for v in {'CHD', 'RN'}]):
+            return False
+
+        all_rela = set([d.rela
+                        for e in path
+                        for d in e.all_data])
+
+        if any([v in all_rela for v in {'do_not_code_with'}]):
+            return False
+
+        pairs = ([{f"has_{c}", f"{c}_of"}
+                  for c in {'intent', 'method', 'specialty'}] +
+                 [{'pathology_of_excluded', 'do_not_code_with'},
+                  {'interprets', 'is_interpreted_by'},
+                  {'pathology_of', 'has_direct_morphology'},
+                  {'pathology_of', 'has_associated_morphology'}])
+        if any([all([v in all_rela for v in p]) for p in pairs]):
+            return False
+
+        if ('pathology_of' in all_rela
+                and any([v in all_rela for v in {'has_direct_morphology',  'has_associated_morphology'}])):
+            return False
+
+        for f in all_rela:
+            if f.startswith('has_'):
+                if f[4:] + '_of' in all_rela:
+                    return False
+        if any([v for v in {'CHD', 'RN'} if v in all_rel]) and any([v for v in all_rela if v.endswith('_of')]):
+            pass
+
+        if any([v for v in {'PAR', 'RB'} if v in all_rel]) and any([v for v in all_rela if v.startswith('has_')]):
+            pass
+
+
+        return True
 
     @staticmethod
     def edge_data_matches_immediate(d: DataForEdge) -> bool:
@@ -729,9 +782,6 @@ def main():
     build_p.add_argument("--sabs", nargs="*", default=None,
                           help="Source vocabularies to keep (e.g. SNOMEDCT_US RXNORM). "
                                "Default: keep all vocabularies.")
-    build_p.add_argument("--code_sabs", nargs="*", default=None,
-                         help="Source vocabularies to keep (e.g. SNOMEDCT_US RXNORM) to keep codes. "
-                              "Default: store no codes.")
 
     path_p = sub.add_parser("path", help="Find the shortest path using an existing cache.")
     path_p.add_argument("--cache-dir", required=True, help="Directory containing the built cache")
@@ -755,7 +805,7 @@ def main():
     if args.command == "build":
         languages = args.languages if args.languages else None
         UMLSCache.build(args.mrconso, args.mrrel, args.mrsty, args.cache_dir,
-                         languages=languages, sabs=args.sabs, code_sabs=args.code_sabs)
+                         languages=languages, sabs=args.sabs)
         return
 
     if args.command == "path":

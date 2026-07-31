@@ -251,8 +251,20 @@ def main():
 
                 paths_code_to_umls = defaultdict(dict)
                 for umls_id, for_umls_id in paths_to_cpts.items():
+                    print(f"umls_id: {umls_id}")
+                    skipped = []
                     for cpt_id, path in for_umls_id.items():
                         code = umls_cache.cui_to_code[cpt_id]
+                        if len(path) > 0:
+                            path_with_data = umls_cache.give_path_with_data(umls_id, cpt_id, path,  reverse=True)
+                            if len(path_with_data) ==1:
+                                if umls_cache.rep_for_immediate(path_with_data[0]) is None:
+                                    skipped.append(path_with_data)
+                                    continue
+                            else:
+                                if not umls_cache.acceptable_feature_path(path_with_data):
+                                    skipped.append(path_with_data)
+                                    continue
 
                         for_code = paths_code_to_umls.get(code)
                         if for_code:
@@ -260,7 +272,12 @@ def main():
                             if prev_path and len(prev_path) <= len(path):
                                 continue
 
+                        print(f"USE:\t{umls_cache.show_path(path_with_data)}")
                         paths_code_to_umls[code][umls_id] = path
+                    for s in sorted(skipped, key=lambda x: (len(x), x[0].first_cui, x[0].second_cui)):
+                        okay = umls_cache.secondary_okay_path(s)
+                        print(f"SKIPPED:\tokay: {okay}\t{umls_cache.show_path(s)}")
+                        pass
                 pass
 
             def sum_inv_for_cpt(cpt_code):
