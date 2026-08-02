@@ -1,10 +1,8 @@
 import argparse
-from UMLS.UMLS_ShortestPath import UMLSCache, UMLS_Tracker
-from ml_util.cpt_holder import get_raw_code_table, ClassInventory
-from ml_util.multi import multi_thread_cpu_map, multi_thread_cpu_iter, multi_cpu_iter_global
+from ml_util.umls.graph_umls import UMLS_Tracker, init_cpt_worker, work_cpt
+from ml_util.cpt_holder import get_raw_code_table
+from ml_util.multi import multi_cpu_iter_global
 
-
-import cProfile, pstats
 
 def main():
     parser = argparse.ArgumentParser()
@@ -51,40 +49,6 @@ def main():
 
     type_weights = umls_tracker.type_weights
     pass
-
-
-from collections import defaultdict
-
-from ml_util.multi import _global_context
-
-
-def init_cpt_worker(cache_dir, descendant_depth):
-    umls_cache = UMLSCache.load(cache_dir)
-
-    return umls_cache, descendant_depth
-
-
-def work_cpt(member):
-    global _global_context
-
-    if _global_context is None:
-        raise RuntimeError("Worker process graph context was not initialized properly.")
-    umls_cache, descendant_depth = _global_context
-
-    cpt_cuis = umls_cache.code_to_cui.get(member.label)
-    if not cpt_cuis:
-        print(f"Missing: cpt: {member.label}")
-        return
-    counts = defaultdict(list)
-    for cpt_cui in cpt_cuis:
-        _, immediate_feats, distant_feats = umls_cache.get_features(cpt_cui, descendant_depth=descendant_depth)
-        for f in immediate_feats:
-            counts[f[2]].append(1.0)
-        for v in distant_feats.values():
-            for d, l in v.items():
-                counts[d].append(1.0 / (1.0 + l))
-    return member.label_ind, {k: max(v) for k, v in counts.items()}
-
 
 
 if __name__ == '__main__':

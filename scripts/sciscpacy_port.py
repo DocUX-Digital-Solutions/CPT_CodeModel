@@ -1,56 +1,20 @@
 import random
 
-import spacy
-import scispacy
-from scispacy.linking import EntityLinker
 from collections import Counter, defaultdict
 
-from typing import Iterable, Tuple
+from typing import Tuple
 
 from ml_util.BM25_interface import BM25Index
 
 
-class SciSpacyInterface:
-    def __init__(self,
-                 *,
-                 model_name: str = "en_core_sci_scibert",
-                 max_return: int = 3):
-        self._model_name = model_name
-        self.nlp = spacy.load(model_name)
-        self.nlp.add_pipe("scispacy_linker",
-                          config={"resolve_abbreviations": True, "linker_name": "umls"})
-
-        self.linker = self.nlp.get_pipe("scispacy_linker")
-        self._max_return = max_return
-
-    def proc_string(self,
-                    text: str,
-                    *,
-                    max_return: int = None) -> Iterable:
-        if max_return is None:
-            max_return = self._max_return
-
-        doc = self.nlp(text)
-        for ent in doc.ents:
-            # print(f"\nEntity: {ent.text}")
-            concepts = []
-            for cui, score in ent._.kb_ents[:max_return]:
-                concept = self.linker.kb.cui_to_entity[cui]
-                concepts.append([score, concept])
-            yield ent, concepts
-                # print(f"  CUI: {cui} "
-                #       f"| Score: {score:.3f} "
-                #       f"| Type: {concept.type} "
-                #       f"| Name: {concept.canonical_name}")
-
 def main():
     from ml_util.cpt_holder import get_raw_code_table
     code_file = "/Users/stevenfincke/PycharmProjects/CPT_CodeModel/Consolidated_Code_List.txt"
-    from UMLS.UMLS_ShortestPath import UMLSCache
+    from ml_util.umls.graph_umls import UMLSCache
 
     umls_cache = UMLSCache.load('/Users/stevenfincke/PycharmProjects/CPT_CodeModel/UMLS/cache_2026AA')
 
-    from UMLS.quick_umls import QuickUMLS_Matcher
+    from ml_util.umls.quick_umls import QuickUMLS_Matcher
     quick_umls_matcher = QuickUMLS_Matcher()
 
     raw_cpt = get_raw_code_table(code_file)
@@ -58,7 +22,7 @@ def main():
                                             name="CPT Inventory",
                                             max_similarity=3)
 
-    from umls_interface import SemGroups
+    from ml_util.umls.umls_sem_classes import SemGroups
     umls_groups = SemGroups()
 
     # interface = SciSpacyInterface(model_name="en_core_sci_lg")

@@ -1,128 +1,22 @@
 import re
-from dataclasses import dataclass
 import torch
 import numpy as np
 from collections import defaultdict, Counter
 
-from typing import List, Tuple, Dict
+from typing import Dict
 
 from SectionSplitter import SectionSplitter
-from UMLS.UMLS_ShortestPath import UMLSCache
-from UMLS.quick_umls import QuickUMLS_Matcher
+from ml_util.reports.report_preparer import ReportPreparer
+from ml_util.umls.graph_umls import UMLSCache
+from ml_util.umls.quick_umls import QuickUMLS_Matcher
 #from datasets.packaged_modules.json.json import ujson_dumps
 
 from ml_util.BM25_interface import BM25Index
-from ml_util.modelling.faiss_interface import SearchIndexWrapper, give_SearchIndexWrapper
-from ml_util.sentence_breaks import SentenceBreaker
+from ml_util.modelling.faiss_interface import give_SearchIndexWrapper
 from ml_util.modelling.sentence_transformer_interface import SentenceTransformerHolder, SentenceCrossEncoder
 from ml_util.medspacy_interface import MedSpacyHolder
 from scripts.embed_descriptions import CPT_embeddings
 from src.report_holder import ReportHolder
-
-
-@dataclass(frozen=True)
-class ChunkSpans:
-    prefix_start: int
-    prefix_end: int
-    text_start: int
-    text_end: int
-
-    @property
-    def text_length(self) -> int:
-        return self.text_end - self.text_start
-
-    @classmethod
-    def merge(cls,
-              chunks: List['ChunkSpans']):
-        if len(chunks) <= 1:
-            raise ValueError
-        chunks = sorted(chunks, key=lambda x: x.text_start)
-        return cls(chunks[0].prefix_start, chunks[0].prefix_end,
-                   chunks[0].text_start, chunks[-1].text_end)
-
-    def texts(self,
-              raw_text: str) -> Tuple[str, str]:
-        return raw_text[self.prefix_start:self.prefix_end], raw_text[self.text_start:self.text_end]
-
-
-class ReportPreparer:
-    hr_re = re.compile(r"\n+")
-    plain_space_re = re.compile(r"^[ ]+$")
-
-    def __init__(self,
-                 *,
-                 skip_sent_split: bool = False,
-                 simple_merge_left: int = 40,
-                 simple_merge_right: int = 200,
-                 need_merge_short_hr: bool = False):
-        self.need_merge_short_hr = need_merge_short_hr
-        self.skip_sent_split = skip_sent_split
-        if not skip_sent_split:
-            self.sentence_breaker = SentenceBreaker.build()
-
-        self.simple_merge_left = simple_merge_left
-        self.simple_merge_right = simple_merge_right
-
-    def give_hr_bound_spans(self,
-                            full_text: str) -> List[Tuple[int]]:
-        hr_spans = [m.regs[0] for m in self.hr_re.finditer(full_text)]
-        out = []
-        if len(hr_spans) < 1:
-            out.append((0, len(full_text)))
-        else:
-            out = [(0, hr_spans[0][0])]
-            for ind in range(len(hr_spans) -1):
-                out.append((hr_spans[ind][1], hr_spans[1+ind][0]))
-            out.append(
-                (hr_spans[-1][1], len(full_text))
-            )
-        return out
-
-    def give_plain_spans_with_pre(self,
-                                  raw_doc) -> List[ChunkSpans]:
-        hr_bound_spans = self.give_hr_bound_spans(raw_doc)
-        ready_spans = [raw_doc[s[0]:s[1]] for s in hr_bound_spans]
-        all_sent_spans = [None for _ in ready_spans] if self.skip_sent_split else self.sentence_breaker.give_sentence_span_list(ready_spans)
-        out: List[ChunkSpans] = []
-        for hr_bound_ind, (hr_bound_span, sent_spans) in enumerate(zip(hr_bound_spans, all_sent_spans)):
-            pre_begin = 0 if hr_bound_ind == 0 else hr_bound_spans[-1 + hr_bound_ind][1]
-            if self.skip_sent_split:
-                out.append(
-                    ChunkSpans(pre_begin, *[hr_bound_span[i] for i in (0, 0, 1)])
-                )
-            else:
-                for sent_span in sent_spans:
-                    out.append(
-                        ChunkSpans(pre_begin,
-                                   *[hr_bound_span[0] + sent_span[i] for i in (0, 0, 1)]
-                                   )
-                    )
-                    pre_begin = hr_bound_span[0] + sent_span[1]
-
-        return out
-
-    def merge_short_hr(self,
-                       raw_doc: str,
-                       spans_with_pre: List[ChunkSpans]):
-        # Just greedy, left to right
-        start_ind = -2 + len(spans_with_pre)
-        for ind in range(start_ind, 0, -1):
-            if spans_with_pre[ind].text_length <= self.simple_merge_left \
-                    and spans_with_pre[1 + ind].text_length <= self.simple_merge_right \
-                    and self.plain_space_re.match(spans_with_pre[ind + 1].texts(raw_doc)[0]) is not None:
-                #and spans_with_pre[ind + 1].texts(raw_doc)[0] == "\n":
-                spans_with_pre[ind] = ChunkSpans.merge(spans_with_pre[ind:ind + 2])
-                spans_with_pre.pop(1 + ind)
-            else:
-                pass
-
-    def give_spans_with_pre(self,
-                            raw_text: str) -> List[ChunkSpans]:
-        out = self.give_plain_spans_with_pre(raw_text)
-        if self.need_merge_short_hr:
-            self.merge_short_hr(raw_text, out)
-
-        return out
 
 
 def main():
