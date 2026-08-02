@@ -207,7 +207,8 @@ class UMLSCache:
     # ----------------------------------------------------------------
 
     @classmethod
-    def build(cls, mrconso_path, mrrel_path, mrsty_path, cache_dir, languages=None, sabs=None):
+    def build(cls, mrconso_path, mrrel_path, mrsty_path, cache_dir, languages=None, sabs=None, weighting=None,
+              centrality_part_cutoff=None, prune_skip_sty=None):
         """
         Parse MRCONSO.RRF and MRREL.RRF, write the resulting graph and
         lookup tables to cache_dir, and return a ready-to-use UMLSCache.
@@ -216,12 +217,20 @@ class UMLSCache:
         sabs: iterable of source vocab codes to keep (e.g. ["SNOMEDCT_US"]).
               None = keep all vocabularies.
         """
+        if weighting:
+            assert weighting in GraphHolder.supported_weighting_schemes
+
         term_to_cuis, cui_to_preferred_term, code_to_cui, sab_for_cui = cls._build_term_lookup(
             mrconso_path, languages=languages, sabs=sabs,
         )
 
         valid_cuis = set(cui_to_preferred_term.keys())
-        graph = cls._build_graph_holder(mrrel_path, sabs=sabs, valid_cuis=valid_cuis)
+
+        cui_to_stn, cui_to_sty = cls._build_cui_to_stn(mrsty_path, valid_cuis=valid_cuis)
+
+        graph = cls._build_graph_holder(mrrel_path, sabs=sabs, valid_cuis=valid_cuis, weighting=weighting,
+                                        centrality_part_cutoff=centrality_part_cutoff, cui_to_sty=cui_to_sty,
+                                        prune_skip_sty=prune_skip_sty)
 
         def proc_code_cuis(all_cuis) -> List[int]:
             if len(all_cuis) <= 1:
@@ -240,7 +249,6 @@ class UMLSCache:
 
         code_to_cui = {k: proc_code_cuis(v) for k, v in code_to_cui.items()}
 
-        cui_to_stn = cls._build_cui_to_stn(mrsty_path, valid_cuis=valid_cuis)
 
         cache = cls(graph, term_to_cuis, cui_to_preferred_term, code_to_cui, sab_for_cui, cui_to_stn)
         cache.save(cache_dir)
@@ -291,8 +299,9 @@ class UMLSCache:
     # ----------------------------------------------------------------
 
     @staticmethod
-    def _build_cui_to_stn(mrsty_path, valid_cuis=None):
+    def _build_cui_to_stn(mrsty_path, valid_cuis=None) -> Tuple[Dict, Dict]:
         cui_to_stn = {}
+        cui_to_sty = {}
         print(f"Parsing {mrsty_path} ...")
         with open(mrsty_path, encoding="utf-8") as f:
             reader = csv.reader(f, delimiter="|")
@@ -305,8 +314,9 @@ class UMLSCache:
                 if valid_cuis and cui not in valid_cuis:
                     continue
                 cui_to_stn[cui] = stn
+                cui_to_sty[cui] = sty
 
-        return cui_to_stn
+        return cui_to_stn, cui_to_sty
 
     @staticmethod
     def _build_term_lookup(mrconso_path, languages=None, sabs=None):
@@ -363,7 +373,12 @@ class UMLSCache:
     @staticmethod
     def _build_graph_holder(mrrel_path, sabs=None, valid_cuis=None,
                             *,
-                            use_networkkit: bool = True) -> GraphHolder:
+                            use_networkkit: bool = True,
+                            weighting: str = None,
+                            centrality_part_cutoff: float = None,
+                            cui_to_sty: Dict = None,
+                            prune_skip_sty: Iterable = None,
+                            ) -> GraphHolder:
         """
         Parse MRREL.RRF into an undirected networkx graph of CUIs.
 
@@ -374,8 +389,11 @@ class UMLSCache:
         sabs = set(sabs) if sabs else None
         # G = nx.Graph()
         # G = nx.MultiDiGraph()
+        if valid_cuis is None:
+            raise NotImplementedError
         G = GraphHolder.create(use_networkkit=use_networkkit,
-                               num_nodes=len(valid_cuis) if valid_cuis else None)
+                               valid_node_names=list(valid_cuis),
+                               weighting=weighting)
 
         print(f"Parsing {mrrel_path} ...")
         with open(mrrel_path, encoding="utf-8") as f:
@@ -392,7 +410,7 @@ class UMLSCache:
                     continue
                 if sabs and sab not in sabs:
                     continue
-                if valid_cuis and (cui1 not in valid_cuis or cui2 not in valid_cuis):
+                if valid_cuis and not all([c in valid_cuis for c in (cui1, cui2)]):
                     continue
 
                 # Keep the most specific relationship label available on the edge.
@@ -401,6 +419,8 @@ class UMLSCache:
                     if {'rel': rel, 'rela': rela, 'sab': sab} in prev.values():
                         continue
                 G.add_edge(cui1, cui2, rel=rel, rela=rela, sab=sab)
+
+        G.finalize_graph(centrality_part_cutoff, cui_to_sty, prune_skip_sty)
 
         print(f"Done. Graph has {G.number_of_nodes():,} nodes and "
               f"{G.number_of_edges():,} edges.")
@@ -558,7 +578,7 @@ class UMLSCache:
                     return True
             return False
         # Could make parallel...
-        for rel_cui_ind, raw_ind_path in self.graph_holder.give_relatives(cui_ind, descendant_depth):
+        for rel_cui_ind, raw_ind_path, path_distance in self.graph_holder.give_relatives(cui_ind, descendant_depth):
             concat = raw_ind_path + tuple([rel_cui_ind])
             if is_bad(concat):
                 continue
@@ -782,6 +802,10 @@ def main():
     build_p.add_argument("--sabs", nargs="*", default=None,
                           help="Source vocabularies to keep (e.g. SNOMEDCT_US RXNORM). "
                                "Default: keep all vocabularies.")
+    build_p.add_argument('--weighting', type=str, choices=GraphHolder.supported_weighting_schemes)
+    build_p.add_argument('--centrality_part_cutoff', type=float)
+    build_p.add_argument('--prune_skip_sty', type=str, nargs='*')
+    build_p.add_argument('--prune_skip_class_sty', type=str, nargs='*')
 
     path_p = sub.add_parser("path", help="Find the shortest path using an existing cache.")
     path_p.add_argument("--cache-dir", required=True, help="Directory containing the built cache")
@@ -804,8 +828,25 @@ def main():
 
     if args.command == "build":
         languages = args.languages if args.languages else None
+        if args.centrality_part_cutoff is not None:
+            from umls_interface import SemGroups, SemCategoryEntry
+            sem_group_table = SemGroups()
+            prune_skip_sty = []
+            if args.prune_skip_class_sty and len(args.prune_skip_class_sty) > 0:
+                for c in args.prune_skip_class_sty:
+                    prune_skip_sty.extend(
+                        [e.code for e in sem_group_table.by_short[c]]
+                    )
+            if args.prune_skip_sty and len(args.prune_skip_sty) > 0:
+                prune_skip_sty.extend(args.prune_skip_sty)
+            prune_skip_sty = sorted(list(set(prune_skip_sty)))
+            assert all([p in sem_group_table.by_code for p in prune_skip_sty])
+        else:
+            prune_skip_sty = None
+
         UMLSCache.build(args.mrconso, args.mrrel, args.mrsty, args.cache_dir,
-                         languages=languages, sabs=args.sabs)
+                         languages=languages, sabs=args.sabs, weighting=args.weighting,
+                        centrality_part_cutoff=args.centrality_part_cutoff, prune_skip_sty=prune_skip_sty)
         return
 
     if args.command == "path":
