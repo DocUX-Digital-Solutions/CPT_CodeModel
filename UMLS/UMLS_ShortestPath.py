@@ -90,6 +90,7 @@ def main():
     build_p.add_argument('--centrality_part_cutoff', type=float)
     build_p.add_argument('--prune_skip_sty', type=str, nargs='*')
     build_p.add_argument('--prune_skip_class_sty', type=str, nargs='*')
+    build_p.add_argument('--directed_graph', action='store_true')
 
     path_p = sub.add_parser("path", help="Find the shortest path using an existing cache.")
     path_p.add_argument("--cache-dir", required=True, help="Directory containing the built cache")
@@ -130,7 +131,8 @@ def main():
 
         UMLSCache.build(args.mrconso, args.mrrel, args.mrsty, args.cache_dir,
                         languages=languages, sabs=args.sabs, weighting=args.weighting,
-                        centrality_part_cutoff=args.centrality_part_cutoff, prune_skip_sty=prune_skip_sty)
+                        centrality_part_cutoff=args.centrality_part_cutoff, prune_skip_sty=prune_skip_sty,
+                        directed_graph=args.directed_graph)
         return
 
     if args.command == "path":
