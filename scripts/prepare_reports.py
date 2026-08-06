@@ -1,3 +1,5 @@
+import cProfile
+import pstats
 import re
 import torch
 import numpy as np
@@ -183,176 +185,185 @@ def main():
         return DistanceScoreHandler() if args.use_distances else PathScoreHandler()
 
     with open(args.output_jsonl, "w", encoding='utf-8') as out_H:
-        all_odi = sorted(list(by_odi.keys()))
-        for odi in all_odi:
-            print(f"odi: {odi}")
-            raw_doc = by_odi[odi].pdf_text
-            texts = []
-            # do_purge = True
-            do_purge = False
+        PROFILE = False
+        if True:
+        #PROFILE = True
+        # with cProfile.Profile() as pr:
+            all_odi = sorted(list(by_odi.keys()))
+            for odi in all_odi:
+                print(f"odi: {odi}")
+                raw_doc = by_odi[odi].pdf_text
+                texts = []
+                # do_purge = True
+                do_purge = False
 
-            def give_simple():
-                spans_with_pre = [s for s in report_preparer.give_spans_with_pre(raw_doc)]
-                return [raw_doc[s.text_start:s.text_end]
-                        for s in spans_with_pre]
+                def give_simple():
+                    spans_with_pre = [s for s in report_preparer.give_spans_with_pre(raw_doc)]
+                    return [raw_doc[s.text_start:s.text_end]
+                            for s in spans_with_pre]
 
-            if not do_purge:
-                texts = give_simple()
-            else:
-                offs, stretches = section_splitter.purge_skip_sections(raw_doc)
-                if sum([len(s) for s in stretches]) < min_retain_portion * len(raw_doc):
+                if not do_purge:
                     texts = give_simple()
-                    print(f"Got less than {min_retain_portion} for: {odi}.")
                 else:
-                    for off, stretch in zip(*section_splitter.purge_skip_sections(raw_doc)):
-                        for s in report_preparer.give_spans_with_pre(stretch):
-                            texts.append(raw_doc[off + s.text_start:off + s.text_end])
-
-            doc_embeddings = torch.cat([b for b in model_holder.encode_no_grad(texts)])
-            if l2_norm:
-                doc_embeddings = torch.nn.functional.normalize(doc_embeddings)
-            distances, indices = search_index.search(doc_embeddings, n_nearest=n_nearest)
-            if cross_encoder is not None:
-                new_sim = []
-                new_indices = []
-                for t_ind, t, in enumerate(texts):
-                    cross_scores = cross_encoder.score_queries(
-                        queries=[cpt_embeddings.descriptions[i] for i in indices[t_ind]],
-                        candidate=t)
-                    cs_as = (-1 * cross_scores).argsort()
-                    new_sim.append(cross_scores[cs_as])
-                    new_indices.append(indices[t_ind][cs_as])
-                distances, indices = [np.stack(l) for l in (new_sim, new_indices)]
-
-            distances, ids, indices = [torch.tensor(a) for a in cpt_embeddings.id_compress(distances, indices)]
-            if bm25_index is not None:
-                d, i = bm25_index.search(texts)
-                bm_distances, bm_ids, bm_indices = [torch.tensor(a) for a in bm25_index.id_compress(d, i)]
-                distances, ids = \
-                    cpt_embeddings.min_max_interpolate(
-                        all_distances=[distances, bm_distances],
-                        all_ids=[ids, bm_ids],
-                        add_weights=[bm25_weight])
-
-            if umls_matcher is not None:
-                umls_matches = {t[0]: t for t in umls_matcher.give_matches(raw_doc).by_cui()}
-                # how to use indices??
-                index_matches = [
-                    cpt_cui
-                    for id in ids.unique().tolist() if id >= 0
-                    for cpt_cui in umls_cache.code_to_cui.get(cpt_embeddings.label_for_id(id), [])]
-                paths_to_cpts = umls_cache.shortest_paths_between_cui_sets(
-                    *[umls_cache.graph_holder.filter_illegal_cuis(set(d))
-                      for d in (list(umls_matches.keys()), index_matches)],
-                    cutoff=args.edge_count_cutoff)
-
-                loc_cui_to_cpts = defaultdict(list)
-                for pc in by_odi[odi].procedure_combinations:
-                    cpt = pc.cpt4Code
-                    if cpt not in umls_cache.code_to_cui:
-                        print(f"No cui for CPT: {cpt} '{umls_cache.cui_to_preferred_term.get(cpt, None)}'")
+                    offs, stretches = section_splitter.purge_skip_sections(raw_doc)
+                    if sum([len(s) for s in stretches]) < min_retain_portion * len(raw_doc):
+                        texts = give_simple()
+                        print(f"Got less than {min_retain_portion} for: {odi}.")
                     else:
-                        for cui in umls_cache.code_to_cui.get(cpt, []):
-                            loc_cui_to_cpts[cui].append(cpt)
+                        for off, stretch in zip(*section_splitter.purge_skip_sections(raw_doc)):
+                            for s in report_preparer.give_spans_with_pre(stretch):
+                                texts.append(raw_doc[off + s.text_start:off + s.text_end])
 
-                def give_ref_matches(cpt_id):
-                    loc_cpt_matches = loc_cui_to_cpts.get(cpt_id)
-                    if loc_cpt_matches:
-                        for_cpt = f"report_cpts: {' '.join(loc_cpt_matches)}"
-                    else:
-                        for_cpt = 'NO CPT MATCHES'
-                    return for_cpt
+                doc_embeddings = torch.cat([b for b in model_holder.encode_no_grad(texts)])
+                if l2_norm:
+                    doc_embeddings = torch.nn.functional.normalize(doc_embeddings)
+                distances, indices = search_index.search(doc_embeddings, n_nearest=n_nearest)
+                if cross_encoder is not None:
+                    new_sim = []
+                    new_indices = []
+                    for t_ind, t, in enumerate(texts):
+                        cross_scores = cross_encoder.score_queries(
+                            queries=[cpt_embeddings.descriptions[i] for i in indices[t_ind]],
+                            candidate=t)
+                        cs_as = (-1 * cross_scores).argsort()
+                        new_sim.append(cross_scores[cs_as])
+                        new_indices.append(indices[t_ind][cs_as])
+                    distances, indices = [np.stack(l) for l in (new_sim, new_indices)]
 
-                # paths_code_to_umls = defaultdict(dict)
-                score_handler = get_score_handler()
-                for umls_id, for_umls_id in paths_to_cpts.items():
-                    print(
-                        f"umls_id: {umls_id} "
-                        f"{umls_cache.cui_to_preferred_term.get(umls_id, 'NO DESCRIPTION FOUND!')}")
-                    skipped = []
-                    for cpt_id, (dist, path) in for_umls_id.items():
-                        code = umls_cache.cui_to_code[cpt_id]
-                        okay = True
-                        acceptable = True
-                        path_with_data = None
-                        if len(path) > 0:
-                            path_with_data = umls_cache.give_path_with_data(umls_id, cpt_id, path, reverse=True)
-                            okay = umls_cache.secondary_okay_path(path_with_data)
-                            if len(path_with_data) == 1:
-                                if umls_cache.rep_for_immediate(path_with_data[0]) is None:
-                                    acceptable = False
-                                    # skipped.append((dist, path_with_data))
-                                    # continue
-                            else:
-                                if not umls_cache.acceptable_feature_path(path_with_data):
-                                    acceptable = False
-                                    # skipped.append((dist, path_with_data))
-                                    # continue
-                        if not okay and not args.accept_all:
-                            skipped.append((dist, path_with_data, acceptable))
-                            continue
+                distances, ids, indices = [torch.tensor(a) for a in cpt_embeddings.id_compress(distances, indices)]
+                if bm25_index is not None:
+                    d, i = bm25_index.search(texts)
+                    bm_distances, bm_ids, bm_indices = [torch.tensor(a) for a in bm25_index.id_compress(d, i)]
+                    distances, ids = \
+                        cpt_embeddings.min_max_interpolate(
+                            all_distances=[distances, bm_distances],
+                            all_ids=[ids, bm_ids],
+                            add_weights=[bm25_weight])
 
-                        if not score_handler.can_add(code, umls_id, path, dist):
-                            continue
-                        # for_code = paths_code_to_umls.get(code)
-                        # if for_code:
-                        #     prev_path = for_code.get(umls_id)
-                        #     if prev_path and len(prev_path) <= len(path):
-                        #         continue
+                if umls_matcher is not None:
+                    umls_matches = {t[0]: t for t in umls_matcher.give_matches(raw_doc).by_cui()}
+                    # how to use indices??
+                    index_matches = [
+                        cpt_cui
+                        for id in ids.unique().tolist() if id >= 0
+                        for cpt_cui in umls_cache.code_to_cui.get(cpt_embeddings.label_for_id(id), [])]
 
-                        print(f"USE:\tacceptable: {acceptable}\td: {fake_scores.present_dist(umls_id, cpt_id, dist)}"
-                              f"\t{give_ref_matches(cpt_id)} "
-                              f"{umls_cache.show_path(path_with_data) if path_with_data else 'DIRECT'}")
-                        # paths_code_to_umls[code][umls_id] = path
-                        score_handler.add(code, umls_id, path, dist)
-                    # for s in sorted(skipped, key=lambda x: (len(x), x[0].first_cui, x[0].second_cui)):
-                    for dist, s, acceptable in sorted(skipped, key=lambda x:
-                    (x[0], len(x[1]), x[1][0].first_cui, x[1][0].second_cui)):
-                        # okay = umls_cache.secondary_okay_path(s)
-                        print(f"SKIPPED:\t{fake_scores.present_dist(umls_id, cpt_id, dist)}\tacceptable: {acceptable}\t"
-                              f"{give_ref_matches(s[0].first_cui)}\t"
-                              f"{umls_cache.show_path(s)}")
+                    inputs = [umls_cache.graph_holder.filter_illegal_cuis(set(d))
+                              for d in (list(umls_matches.keys()), index_matches)]
+                    print(f"input counts: {[len(i) for i in inputs]}")
+                    paths_to_cpts = umls_cache.shortest_paths_between_cui_sets(*inputs, cutoff=args.edge_count_cutoff)
+
+                    loc_cui_to_cpts = defaultdict(list)
+                    for pc in by_odi[odi].procedure_combinations:
+                        cpt = pc.cpt4Code
+                        if cpt not in umls_cache.code_to_cui:
+                            print(f"No cui for CPT: {cpt} '{umls_cache.cui_to_preferred_term.get(cpt, None)}'")
+                        else:
+                            for cui in umls_cache.code_to_cui.get(cpt, []):
+                                loc_cui_to_cpts[cui].append(cpt)
+
+                    def give_ref_matches(cpt_id):
+                        loc_cpt_matches = loc_cui_to_cpts.get(cpt_id)
+                        if loc_cpt_matches:
+                            for_cpt = f"report_cpts: {' '.join(loc_cpt_matches)}"
+                        else:
+                            for_cpt = 'NO CPT MATCHES'
+                        return for_cpt
+
+                    # paths_code_to_umls = defaultdict(dict)
+                    score_handler = get_score_handler()
+                    for umls_id, for_umls_id in paths_to_cpts.items():
+                        print(
+                            f"umls_id: {umls_id} "
+                            f"{umls_cache.cui_to_preferred_term.get(umls_id, 'NO DESCRIPTION FOUND!')}")
+                        skipped = []
+                        for cpt_id, (dist, path) in for_umls_id.items():
+                            code = umls_cache.cui_to_code[cpt_id]
+                            okay = True
+                            acceptable = True
+                            path_with_data = None
+                            if len(path) > 0:
+                                path_with_data = umls_cache.give_path_with_data(umls_id, cpt_id, path, reverse=True)
+                                okay = umls_cache.secondary_okay_path(path_with_data)
+                                if len(path_with_data) == 1:
+                                    if umls_cache.rep_for_immediate(path_with_data[0]) is None:
+                                        acceptable = False
+                                        # skipped.append((dist, path_with_data))
+                                        # continue
+                                else:
+                                    if not umls_cache.acceptable_feature_path(path_with_data):
+                                        acceptable = False
+                                        # skipped.append((dist, path_with_data))
+                                        # continue
+                            if not okay and not args.accept_all:
+                                skipped.append((dist, path_with_data, acceptable))
+                                continue
+
+                            if not score_handler.can_add(code, umls_id, path, dist):
+                                continue
+                            # for_code = paths_code_to_umls.get(code)
+                            # if for_code:
+                            #     prev_path = for_code.get(umls_id)
+                            #     if prev_path and len(prev_path) <= len(path):
+                            #         continue
+
+                            print(f"USE:\tacceptable: {acceptable}\td: {fake_scores.present_dist(umls_id, cpt_id, dist)}"
+                                  f"\t{give_ref_matches(cpt_id)} "
+                                  f"{umls_cache.show_path(path_with_data) if path_with_data else 'DIRECT'}")
+                            # paths_code_to_umls[code][umls_id] = path
+                            score_handler.add(code, umls_id, path, dist)
+                        # for s in sorted(skipped, key=lambda x: (len(x), x[0].first_cui, x[0].second_cui)):
+                        for dist, s, acceptable in sorted(skipped, key=lambda x:
+                        (x[0], len(x[1]), x[1][0].first_cui, x[1][0].second_cui)):
+                            # okay = umls_cache.secondary_okay_path(s)
+                            print(f"SKIPPED:\t{fake_scores.present_dist(umls_id, cpt_id, dist)}\tacceptable: {acceptable}\t"
+                                  f"{give_ref_matches(s[0].first_cui)}\t"
+                                  f"{umls_cache.show_path(s)}")
+                            pass
                         pass
                     pass
+
+                # def sum_inv_for_cpt(cpt_code):
+                #     return sum([1 / (1 + len(v)) for v in paths_code_to_umls[cpt_code].values()])
+
+                for pc in by_odi[odi].procedure_combinations:
+                    first_desc, matches = cpt_embeddings.give_matches(pc.cpt4Code, ids)
+                    print(f"cpt: {pc.cpt4Code} '{first_desc}' cuis: {umls_cache.code_to_cui.get(pc.cpt4Code, None)} "
+                          f"umls_inv: {score_handler.give_final_score(pc.cpt4Code):.2f}")
+                    if first_desc is None or len(matches) < 1:
+                        print(f"no match for {pc.cpt4Code} in {odi}.")
+                        recall_by_cpt[pc.cpt4Code][-1] += 1
+                        # Show the top matches...
+                    else:
+                        by_rank = torch.argsort(matches[:, 1])
+                        by_score = torch.argsort(-1 * torch.tensor(distances)[matches[:, 0], matches[:, 1]])
+                        # Just take the mean???
+                        by_combined = (by_rank + by_score).argsort()
+                        # use_for_sort = by_combined
+                        use_for_sort = by_rank
+                        # if by_max
+                        # use_for_sort = by_score
+                        for m_rank, m in enumerate(matches[use_for_sort]):
+                            if m_rank == 0:
+                                recall_by_cpt[pc.cpt4Code][m[1].item()] += 1
+                            print(f"{odi}\t{pc.cpt4Code} m: {m_rank} "
+                                  f"rank for string: {m[1]} "
+                                  f"dist: {distances[m[0], m[1]]:.3f} "                              
+                                  f"{texts[m[0]]}")
+
+                            for rank, (score, cpt_id) in enumerate(zip(distances[m[0]][:m[1]], ids[m[0]][:m[1]])):
+                                label = cpt_embeddings.label_for_id(cpt_id)
+                                print(f"\tover at {rank} ({score:.3f}): "                                  
+                                      f"{label} "
+                                      f"umls_inv: {score_handler.give_final_score(label):.2f} "
+                                      f"{cpt_embeddings.first_description_for_id(cpt_id)}")
+                    pass
+                if PROFILE:
+                    stats = pstats.Stats(pr)
+                    stats.sort_stats(pstats.SortKey.CUMULATIVE).print_stats(10)  # Prints top 10 bottlenecks
                 pass
 
-            # def sum_inv_for_cpt(cpt_code):
-            #     return sum([1 / (1 + len(v)) for v in paths_code_to_umls[cpt_code].values()])
-
-            for pc in by_odi[odi].procedure_combinations:
-                first_desc, matches = cpt_embeddings.give_matches(pc.cpt4Code, ids)
-                print(f"cpt: {pc.cpt4Code} '{first_desc}' cuis: {umls_cache.code_to_cui.get(pc.cpt4Code, None)} "
-                      f"umls_inv: {score_handler.give_final_score(pc.cpt4Code):.2f}")
-                if first_desc is None or len(matches) < 1:
-                    print(f"no match for {pc.cpt4Code} in {odi}.")
-                    recall_by_cpt[pc.cpt4Code][-1] += 1
-                    # Show the top matches...
-                else:
-                    by_rank = torch.argsort(matches[:, 1])
-                    by_score = torch.argsort(-1 * torch.tensor(distances)[matches[:, 0], matches[:, 1]])
-                    # Just take the mean???
-                    by_combined = (by_rank + by_score).argsort()
-                    # use_for_sort = by_combined
-                    use_for_sort = by_rank
-                    # if by_max
-                    # use_for_sort = by_score
-                    for m_rank, m in enumerate(matches[use_for_sort]):
-                        if m_rank == 0:
-                            recall_by_cpt[pc.cpt4Code][m[1].item()] += 1
-                        print(f"{odi}\t{pc.cpt4Code} m: {m_rank} "
-                              f"rank for string: {m[1]} "
-                              f"dist: {distances[m[0], m[1]]:.3f} "                              
-                              f"{texts[m[0]]}")
-
-                        for rank, (score, cpt_id) in enumerate(zip(distances[m[0]][:m[1]], ids[m[0]][:m[1]])):
-                            label = cpt_embeddings.label_for_id(cpt_id)
-                            print(f"\tover at {rank} ({score:.3f}): "                                  
-                                  f"{label} "
-                                  f"umls_inv: {score_handler.give_final_score(label):.2f} "
-                                  f"{cpt_embeddings.first_description_for_id(cpt_id)}")
-                pass
-
-            # Need to check...
+                # Need to check...
 
     digits_only = re.compile(r"^[0-9]{5}$")
     view_inds = (1, 3, 5, 10, 15, 20, 30, 40)
