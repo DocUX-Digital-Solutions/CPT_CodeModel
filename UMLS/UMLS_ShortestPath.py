@@ -84,13 +84,17 @@ def main():
     build_p.add_argument("--languages", nargs="*", default=["ENG"],
                           help="LAT codes to keep (default: ENG). Pass nothing to keep all.")
     build_p.add_argument("--sabs", nargs="*", default=None,
-                          help="Source vocabularies to keep (e.g. SNOMEDCT_US RXNORM). "
+                          help="Source vocabularies to keep in the master graph (e.g. SNOMEDCT_US RXNORM). "
                                "Default: keep all vocabularies.")
+    build_p.add_argument("--feature_sabs", nargs="*", default=None,
+                         help="Source vocabularies to keep the feature map (e.g. SNOMEDCT_US). "
+                              "Default: same as --sabs.")
     build_p.add_argument('--weighting', type=str, choices=GraphHolder.supported_weighting_schemes)
     build_p.add_argument('--centrality_part_cutoff', type=float)
     build_p.add_argument('--prune_skip_sty', type=str, nargs='*')
     build_p.add_argument('--prune_skip_class_sty', type=str, nargs='*')
     build_p.add_argument('--directed_graph', action='store_true')
+    build_p.add_argument('--intermediate_pickle_dir', type=str)
 
     path_p = sub.add_parser("path", help="Find the shortest path using an existing cache.")
     path_p.add_argument("--cache-dir", required=True, help="Directory containing the built cache")
@@ -129,10 +133,15 @@ def main():
         else:
             prune_skip_sty = None
 
+        feature_sabs = args.feature_sabs
+        if feature_sabs is None and args.sabs:
+            feature_sabs = args.sabs[:]
         UMLSCache.build(args.mrconso, args.mrrel, args.mrsty, args.cache_dir,
                         languages=languages, sabs=args.sabs, weighting=args.weighting,
                         centrality_part_cutoff=args.centrality_part_cutoff, prune_skip_sty=prune_skip_sty,
-                        directed_graph=args.directed_graph)
+                        directed_graph=args.directed_graph, feature_sabs=feature_sabs,
+                        intermediate_pickle_dir=args.intermediate_pickle_dir,
+                        )
         return
 
     if args.command == "path":

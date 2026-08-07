@@ -43,6 +43,8 @@ def main():
 
     # show_path('26460', '25290')
     show_path('27130', '27299')
+    loc = umls_cache.graph_holder.near_type_match(umls_cache.code_to_cui['27130'][0], 'sab', ['SNOMEDCT_US', 'MEDCIN'])
+    loc = umls_cache.nearest_snomed(umls_cache.code_to_cui['27130'][0])
     pass
     print(f"got here!")
 
