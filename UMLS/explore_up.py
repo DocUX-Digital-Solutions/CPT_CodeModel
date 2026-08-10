@@ -1,4 +1,5 @@
 from ml_util.umls.graph_umls import UMLSCache
+from ml_util.umls.nk_neighborhood import NKNeighborhood
 
 
 def main():
@@ -16,7 +17,7 @@ def main():
     def show_path(cpt0, cpt1):
         cui0 = umls_cache.code_to_cui[cpt0]
         cui1 = umls_cache.code_to_cui[cpt1]
-        path = umls_cache.shortest_paths_between_cui_sets(cui0, cui1, cutoff=30)
+        path = umls_cache.shortest_paths_between_cui_sets(cui0, cui1, cutoff=50)
 
         def show_cuis(all_c):
             if isinstance(all_c, str):
@@ -42,9 +43,11 @@ def main():
         return "\n".join(out)
 
     # show_path('26460', '25290')
-    show_path('27130', '27299')
-    loc = umls_cache.graph_holder.near_type_match(umls_cache.code_to_cui['27130'][0], 'sab', ['SNOMEDCT_US', 'MEDCIN'])
-    loc = umls_cache.nearest_snomed(umls_cache.code_to_cui['27130'][0])
+    first_cuis = list(umls_cache.code_to_cui['27130'])
+    neighborhood = NKNeighborhood(umls_cache, first_cuis)
+    loc = show_path('27130', '27299')
+    loc = umls_cache.graph_holder.near_type_match(first_cuis[0], 'sab', ['SNOMEDCT_US', 'MEDCIN'])
+    loc = UMLSCache.nearest_snomed(umls_cache.graph_holder, umls_cache.code_to_cui['27130'][0])
     pass
     print(f"got here!")
 

@@ -8,6 +8,7 @@ from collections import defaultdict, Counter
 from typing import Dict, FrozenSet, List
 
 from SectionSplitter import SectionSplitter
+from ml_util.data import TorchTensorHolder
 from ml_util.reports.report_preparer import ReportPreparer
 from ml_util.scispcacy_interface import SciSpacyInterface
 from ml_util.umls.graph_umls import UMLSCache
@@ -23,13 +24,28 @@ from src.report_holder import ReportHolder
 
 
 class ScoreHandler:
-    def __init__(self):
+    def __init__(self,
+                 umls_cache: UMLSCache,
+                 target_cpts: List[str],
+                 retrieved_cpt_cuis: List[str],
+                 ):
+        self.umls_cache = umls_cache
         self._entries = defaultdict(dict)
 
-    def can_add(self, n0, n1, path, dist) -> bool:
+        self._target_cpts = tuple(target_cpts)
+        self.retrieved_cpt_cuis = tuple(retrieved_cpt_cuis)
+        self._loc_cui_to_cpts = defaultdict(list)
+        for cpt in self._target_cpts:
+            if cpt not in umls_cache.code_to_cui:
+                print(f"No cui for CPT: {cpt} '{self.umls_cache.cui_to_preferred_term.get(cpt, None)}'")
+            else:
+                for cui in umls_cache.code_to_cui.get(cpt, []):
+                    self._loc_cui_to_cpts[cui].append(cpt)
+
+    def can_add(self, n0, n1, dist, path) -> bool:
         raise NotImplementedError
 
-    def add(self, n0, n1, path, dist):
+    def add(self, n0, n1, dist, path):
         raise NotImplementedError
 
     def give_final_score(self, n0) -> float:
@@ -40,36 +56,183 @@ class ScoreHandler:
             return self._entries[n0][n1]
         except KeyError:
             raise
+    ###
 
+    def give_ref_matches(self,
+                         cpt_id: str):
+        loc_cpt_matches = self._loc_cui_to_cpts.get(cpt_id)
+        if loc_cpt_matches:
+            for_cpt = f"report_cpts: {' '.join(loc_cpt_matches)}"
+        else:
+            for_cpt = 'NO CPT MATCHES'
+        return for_cpt
 
-class PathScoreHandler(ScoreHandler):
-        def __init__(self):
-            super().__init__()
+    def process_cpts_to_umls(self,
+                             umls_ids: List[str],
+                             ):
+        raise NotImplementedError
 
-        def can_add(self, n0, n1, path, dist) -> bool:
-            for_code = self._entries.get(n0)
-            if for_code:
-                prev_path = for_code.get(n1)
-                if prev_path and len(prev_path) <= len(path):
-                    return False
+from typing import Tuple
 
-            return True
-
-        def add(self, n0, n1, path, dist):
-            self._entries[n0][n1] = path
-
-        def give_final_score(self, n0) -> float:
-            return float(sum([1 / (1 + len(v)) for v in self._entries[n0].values()]))
-
-
-class DistanceScoreHandler(ScoreHandler):
+class VecScoreHandler(ScoreHandler):
     def __init__(self,
-                 *,
-                 decay_rate: float = 2.0):
-        super().__init__()
+                 umls_cache: UMLSCache,
+                 target_cpts: List[str],
+                 accept_all: bool,
+                 tensor_holder: TorchTensorHolder,
+                 ):
+        super().__init__(umls_cache=umls_cache, target_cpts=target_cpts)
+        self._entries: Dict[Tuple[int, int], float] = {}
+        self.accept_all = accept_all
+        self.tensor_holder = tensor_holder
+
+    def can_add(self, n0, n1, dist, path):
+        prev_dist = self._entries.get((n0, n1))
+        return (prev_dist and prev_dist > dist) is False
+
+    def add(self, n0, n1, dist, path):
+        self._entries[(n0, n1)] = dist
+
+
+    def process_cpts_to_umls(self,
+                             # sources: List[str], # document UMLS CUIs
+                             umls_ids: List[str],  # CPTs
+                             ):
+        raise NotImplementedError
+
+    def give_final_score(self, n0) -> float:
+        raise NotImplementedError
+
+###
+
+class FakeScores:
+    def __init__(self,
+                 umls_cache: UMLSCache,
+                 ):
+        self.umls_cache = umls_cache
+        self._prev: Dict[FrozenSet[str], float] = dict()
+
+    def get(self, n0, n1) -> float:
+        l = frozenset([n0, n1])
+        out = self._prev.get(l)
+        if out is None:
+            inds = self.umls_cache.graph_holder.get_name_ind_tuple(n0, n1)
+            out = self.umls_cache.graph_holder.fake_adamic_adar_between(*inds)
+            self._prev[l] = out
+        return out
+
+    def present_dist(self, n0, n1, dist: float):
+        fake = self.get(n0, n1)
+        return f"d: {dist:.4f} ({fake:.4f} -> {dist - fake:+.4f})"
+
+###
+
+class NetworkScoreHandler(ScoreHandler):
+    def __init__(self,
+                 umls_cache: UMLSCache,
+                 target_cpts: List[str],
+                 retrieved_cpt_cuis: List[str],
+                 edge_count_cutoff: int,
+                 accept_all: bool,
+                 ):
+        super().__init__(umls_cache=umls_cache,
+                         target_cpts=target_cpts,
+                         retrieved_cpt_cuis=retrieved_cpt_cuis)
+        self.edge_count_cutoff = edge_count_cutoff
+        self.accept_all = accept_all
+        self.fake_scores = FakeScores(self.umls_cache)
+
+    def process_cpts_to_umls(self,
+                             # sources: List[str], # document UMLS CUIs
+                             umls_ids: List[str],  # CPTs
+                             ):
+        inputs = [self.umls_cache.graph_holder.filter_illegal_cuis(set(d))
+                  for d in (umls_ids, self.retrieved_cpt_cuis)]
+        print(f"input counts: {[len(i) for i in inputs]}")
+        paths_to_cpts = (
+            self.umls_cache.shortest_paths_between_cui_sets(*inputs,
+                                                            cutoff=self.edge_count_cutoff))
+        for umls_id, for_umls_id in paths_to_cpts.items():
+            print(
+                f"umls_id: {umls_id} "
+                f"{self.umls_cache.cui_to_preferred_term.get(umls_id, 'NO DESCRIPTION FOUND!')}")
+            skipped = []
+            for cpt_id, (dist, path) in for_umls_id.items():
+                code = self.umls_cache.cui_to_code[cpt_id]
+                okay = True
+                acceptable = True
+                path_with_data = None
+                if len(path) > 0:
+                    path_with_data = self.umls_cache.give_path_with_data(umls_id, cpt_id, path, reverse=True)
+                    okay = self.umls_cache.secondary_okay_path(path_with_data)
+                    if len(path_with_data) == 1:
+                        if self.umls_cache.rep_for_immediate(path_with_data[0]) is None:
+                            acceptable = False
+                            # skipped.append((dist, path_with_data))
+                            # continue
+                    else:
+                        if not self.umls_cache.acceptable_feature_path(path_with_data):
+                            acceptable = False
+                            # skipped.append((dist, path_with_data))
+                            # continue
+                if not okay and not self.accept_all:
+                    skipped.append((dist, path_with_data, acceptable))
+                    continue
+
+                if not self.can_add(code, umls_id, dist, path):
+                    continue
+                # for_code = paths_code_to_umls.get(code)
+                # if for_code:
+                #     prev_path = for_code.get(umls_id)
+                #     if prev_path and len(prev_path) <= len(path):
+                #         continue
+
+                print(f"USE:\tacceptable: {acceptable}\td: {self.fake_scores.present_dist(umls_id, cpt_id, dist)}"
+                      f"\t{self.give_ref_matches(cpt_id)} "
+                      f"{self.umls_cache.show_path(path_with_data) if path_with_data else 'DIRECT'}")
+                # paths_code_to_umls[code][umls_id] = path
+                # score_handler.add(code, umls_id, path, dist)
+                self.add(code, umls_id, dist, path)
+            # for s in sorted(skipped, key=lambda x: (len(x), x[0].first_cui, x[0].second_cui)):
+            for dist, s, acceptable in sorted(skipped, key=lambda x:
+            (x[0], len(x[1]), x[1][0].first_cui, x[1][0].second_cui)):
+                # okay = umls_cache.secondary_okay_path(s)
+                print(f"SKIPPED:\t{self.fake_scores.present_dist(umls_id, cpt_id, dist)}\tacceptable: {acceptable}\t"
+                      f"{self.give_ref_matches(s[0].first_cui)}\t"
+                      f"{self. umls_cache.show_path(s)}")
+                pass
+            pass
+        pass
+        ####
+
+
+
+class PathScoreHandler(NetworkScoreHandler):
+    def can_add(self, n0, n1, dist, path) -> bool:
+        for_code = self._entries.get(n0)
+        if for_code:
+            prev_path = for_code.get(n1)
+            if prev_path and len(prev_path) <= len(path):
+                return False
+
+        return True
+
+    def add(self, n0, n1, dist, path):
+        self._entries[n0][n1] = path
+
+    def give_final_score(self, n0) -> float:
+        return float(sum([1 / (1 + len(v)) for v in self._entries[n0].values()]))
+
+
+class DistanceScoreHandler(NetworkScoreHandler):
+    def __init__(self,
+                 decay_rate: float = 2.0,
+                 *args,
+                 **kwargs, ):
+        super().__init__(*args, **kwargs)
         self._decay_rate = decay_rate
 
-    def can_add(self, n0, n1, path, dist) -> bool:
+    def can_add(self, n0, n1, dist, path) -> bool:
         for_code = self._entries.get(n0)
         if for_code:
             prev = for_code.get(n1)
@@ -78,7 +241,7 @@ class DistanceScoreHandler(ScoreHandler):
 
         return True
 
-    def add(self, n0, n1, path, dist):
+    def add(self, n0, n1, dist, path):
         self._entries[n0][n1] = (dist, len(path))
 
     def give_final_score(self, n0) -> float:
@@ -114,9 +277,15 @@ def main():
     parser.add_argument('--scispacy_model', type=str)
     parser.add_argument('--accept_all', action='store_true')
     parser.add_argument('--use_distances', action='store_true')
+    parser.add_argument('--cui2vec_csv', type=str,
+                        default="/Users/stevenfincke/PycharmProjects/CPT_CodeModel/UMLS/cui2vec_pretrained.csv")
     args = parser.parse_args()
     input_jsonl = args.input_jsonl
     min_retain_portion = args.min_retain_portion
+
+    cui2vec = None
+    if args.cui2vec_csv:
+        cui2vec = TorchTensorHolder(args.cui2vec_csv)
 
     bm25_index = None
     bm25_weight = args.bm25_weight
@@ -137,9 +306,9 @@ def main():
             # DIGDI
             # if len(by_odi) >= 10:
             #     break
+
     # medspacy_holder = MedSpacyHolder()
     section_splitter = SectionSplitter()
-    umls_matcher: UMLS_Matcher  = None
     if args.scispacy_model:
         umls_matcher = SciSpacyInterface(model_name=args.scispacy_model)
     else:
@@ -181,8 +350,10 @@ def main():
         else SentenceCrossEncoder.create(args.cross_encoder_model,
                                          trust_remote_code=args.cross_trust_remote)
 
-    def get_score_handler() -> ScoreHandler:
-        return DistanceScoreHandler() if args.use_distances else PathScoreHandler()
+    # ?? DIGDI
+    def get_score_handler(*loc_args, **kwargs) -> ScoreHandler:
+        return DistanceScoreHandler(*loc_args, **kwargs) if args.use_distances \
+            else PathScoreHandler(*loc_args, **kwargs)
 
     with open(args.output_jsonl, "w", encoding='utf-8') as out_H:
         PROFILE = False
@@ -248,83 +419,96 @@ def main():
                         for id in ids.unique().tolist() if id >= 0
                         for cpt_cui in umls_cache.code_to_cui.get(cpt_embeddings.label_for_id(id), [])]
 
-                    inputs = [umls_cache.graph_holder.filter_illegal_cuis(set(d))
-                              for d in (list(umls_matches.keys()), index_matches)]
-                    print(f"input counts: {[len(i) for i in inputs]}")
-                    paths_to_cpts = umls_cache.shortest_paths_between_cui_sets(*inputs, cutoff=args.edge_count_cutoff)
+                    target_cpts = sorted(list(set([pc.cpt4Code for pc in by_odi[odi].procedure_combinations])))
 
-                    loc_cui_to_cpts = defaultdict(list)
-                    for pc in by_odi[odi].procedure_combinations:
-                        cpt = pc.cpt4Code
-                        if cpt not in umls_cache.code_to_cui:
-                            print(f"No cui for CPT: {cpt} '{umls_cache.cui_to_preferred_term.get(cpt, None)}'")
-                        else:
-                            for cui in umls_cache.code_to_cui.get(cpt, []):
-                                loc_cui_to_cpts[cui].append(cpt)
+                    # Integrate here!
+                    score_handler = get_score_handler(umls_cache=umls_cache,
+                                                      target_cpts=target_cpts,
+                                                      retrieved_cpt_cuis=index_matches, # Bring this through!!!
+                                                      edge_count_cutoff=args.edge_count_cutoff,
+                                                      accept_all=args.accept_all)
+                    # loc_cui_to_cpts = defaultdict(list)
+                    # for pc in by_odi[odi].procedure_combinations:
+                    #     cpt = pc.cpt4Code
+                    #     if cpt not in umls_cache.code_to_cui:
+                    #         print(f"No cui for CPT: {cpt} '{umls_cache.cui_to_preferred_term.get(cpt, None)}'")
+                    #     else:
+                    #         for cui in umls_cache.code_to_cui.get(cpt, []):
+                    #             loc_cui_to_cpts[cui].append(cpt)
+                    #
+                    # def give_ref_matches(cpt_id):
+                    #     loc_cpt_matches = loc_cui_to_cpts.get(cpt_id)
+                    #     if loc_cpt_matches:
+                    #         for_cpt = f"report_cpts: {' '.join(loc_cpt_matches)}"
+                    #     else:
+                    #         for_cpt = 'NO CPT MATCHES'
+                    #     return for_cpt
 
-                    def give_ref_matches(cpt_id):
-                        loc_cpt_matches = loc_cui_to_cpts.get(cpt_id)
-                        if loc_cpt_matches:
-                            for_cpt = f"report_cpts: {' '.join(loc_cpt_matches)}"
-                        else:
-                            for_cpt = 'NO CPT MATCHES'
-                        return for_cpt
+                    score_handler.process_cpts_to_umls(list(umls_matches.keys()))
+                    ####
 
-                    # paths_code_to_umls = defaultdict(dict)
-                    score_handler = get_score_handler()
-                    for umls_id, for_umls_id in paths_to_cpts.items():
-                        print(
-                            f"umls_id: {umls_id} "
-                            f"{umls_cache.cui_to_preferred_term.get(umls_id, 'NO DESCRIPTION FOUND!')}")
-                        skipped = []
-                        for cpt_id, (dist, path) in for_umls_id.items():
-                            code = umls_cache.cui_to_code[cpt_id]
-                            okay = True
-                            acceptable = True
-                            path_with_data = None
-                            if len(path) > 0:
-                                path_with_data = umls_cache.give_path_with_data(umls_id, cpt_id, path, reverse=True)
-                                okay = umls_cache.secondary_okay_path(path_with_data)
-                                if len(path_with_data) == 1:
-                                    if umls_cache.rep_for_immediate(path_with_data[0]) is None:
-                                        acceptable = False
-                                        # skipped.append((dist, path_with_data))
-                                        # continue
-                                else:
-                                    if not umls_cache.acceptable_feature_path(path_with_data):
-                                        acceptable = False
-                                        # skipped.append((dist, path_with_data))
-                                        # continue
-                            if not okay and not args.accept_all:
-                                skipped.append((dist, path_with_data, acceptable))
-                                continue
-
-                            if not score_handler.can_add(code, umls_id, path, dist):
-                                continue
-                            # for_code = paths_code_to_umls.get(code)
-                            # if for_code:
-                            #     prev_path = for_code.get(umls_id)
-                            #     if prev_path and len(prev_path) <= len(path):
-                            #         continue
-
-                            print(f"USE:\tacceptable: {acceptable}\td: {fake_scores.present_dist(umls_id, cpt_id, dist)}"
-                                  f"\t{give_ref_matches(cpt_id)} "
-                                  f"{umls_cache.show_path(path_with_data) if path_with_data else 'DIRECT'}")
-                            # paths_code_to_umls[code][umls_id] = path
-                            score_handler.add(code, umls_id, path, dist)
-                        # for s in sorted(skipped, key=lambda x: (len(x), x[0].first_cui, x[0].second_cui)):
-                        for dist, s, acceptable in sorted(skipped, key=lambda x:
-                        (x[0], len(x[1]), x[1][0].first_cui, x[1][0].second_cui)):
-                            # okay = umls_cache.secondary_okay_path(s)
-                            print(f"SKIPPED:\t{fake_scores.present_dist(umls_id, cpt_id, dist)}\tacceptable: {acceptable}\t"
-                                  f"{give_ref_matches(s[0].first_cui)}\t"
-                                  f"{umls_cache.show_path(s)}")
-                            pass
-                        pass
-                    pass
+                    # inputs = [umls_cache.graph_holder.filter_illegal_cuis(set(d))
+                    #           for d in (list(umls_matches.keys()), index_matches)]
+                    # print(f"input counts: {[len(i) for i in inputs]}")
+                    # paths_to_cpts = umls_cache.shortest_paths_between_cui_sets(*inputs,
+                    #                                                            cutoff=args.edge_count_cutoff)
+                    # # paths_code_to_umls = defaultdict(dict)
+                    # for umls_id, for_umls_id in paths_to_cpts.items():
+                    #     print(
+                    #         f"umls_id: {umls_id} "
+                    #         f"{umls_cache.cui_to_preferred_term.get(umls_id, 'NO DESCRIPTION FOUND!')}")
+                    #     skipped = []
+                    #     for cpt_id, (dist, path) in for_umls_id.items():
+                    #         code = umls_cache.cui_to_code[cpt_id]
+                    #         okay = True
+                    #         acceptable = True
+                    #         path_with_data = None
+                    #         if len(path) > 0:
+                    #             path_with_data = umls_cache.give_path_with_data(umls_id, cpt_id, path, reverse=True)
+                    #             okay = umls_cache.secondary_okay_path(path_with_data)
+                    #             if len(path_with_data) == 1:
+                    #                 if umls_cache.rep_for_immediate(path_with_data[0]) is None:
+                    #                     acceptable = False
+                    #                     # skipped.append((dist, path_with_data))
+                    #                     # continue
+                    #             else:
+                    #                 if not umls_cache.acceptable_feature_path(path_with_data):
+                    #                     acceptable = False
+                    #                     # skipped.append((dist, path_with_data))
+                    #                     # continue
+                    #         if not okay and not args.accept_all:
+                    #             skipped.append((dist, path_with_data, acceptable))
+                    #             continue
+                    #
+                    #         if not score_handler.can_add(code, umls_id, dist, path):
+                    #             continue
+                    #         # for_code = paths_code_to_umls.get(code)
+                    #         # if for_code:
+                    #         #     prev_path = for_code.get(umls_id)
+                    #         #     if prev_path and len(prev_path) <= len(path):
+                    #         #         continue
+                    #
+                    #         print(f"USE:\tacceptable: {acceptable}\td: {fake_scores.present_dist(umls_id, cpt_id, dist)}"
+                    #               f"\t{give_ref_matches(cpt_id)} "
+                    #               f"{umls_cache.show_path(path_with_data) if path_with_data else 'DIRECT'}")
+                    #         # paths_code_to_umls[code][umls_id] = path
+                    #         #score_handler.add(code, umls_id, path, dist)
+                    #         score_handler.add(code, umls_id, dist, path)
+                    #     # for s in sorted(skipped, key=lambda x: (len(x), x[0].first_cui, x[0].second_cui)):
+                    #     for dist, s, acceptable in sorted(skipped, key=lambda x:
+                    #     (x[0], len(x[1]), x[1][0].first_cui, x[1][0].second_cui)):
+                    #         # okay = umls_cache.secondary_okay_path(s)
+                    #         print(f"SKIPPED:\t{fake_scores.present_dist(umls_id, cpt_id, dist)}\tacceptable: {acceptable}\t"
+                    #               f"{give_ref_matches(s[0].first_cui)}\t"
+                    #               f"{umls_cache.show_path(s)}")
+                    #         pass
+                    #     pass
+                    # pass
 
                 # def sum_inv_for_cpt(cpt_code):
                 #     return sum([1 / (1 + len(v)) for v in paths_code_to_umls[cpt_code].values()])
+
+                # Integrate -- ??? in place ??
 
                 for pc in by_odi[odi].procedure_combinations:
                     first_desc, matches = cpt_embeddings.give_matches(pc.cpt4Code, ids)
