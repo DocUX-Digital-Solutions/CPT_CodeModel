@@ -42,7 +42,7 @@ toy_strings = ('rotator',
                "The wound grossly looked like it was responding well to the "
                "combination of surgical debridement as well as the antibiotics.",
                "Again noted was "
-               "severe amounts of osteolysis consistent with deep chronic bone infection.",
+               "severe amounts of osteolysis consistent with neural_graph chronic bone infection.",
 
                "Exploration of the patient's prior fusion site was performed at T12, L1, L2. "
                "The fusion site clinically looked significantly better from an infection "
@@ -51,7 +51,7 @@ toy_strings = ('rotator',
                "The wound grossly looked like it was responding well to the "
                "combination of surgical debridement as well as the antibiotics."
                "Again noted was "
-               "severe amounts of osteolysis consistent with deep chronic bone infection."
+               "severe amounts of osteolysis consistent with neural_graph chronic bone infection."
                )
 
 
