@@ -1,4 +1,3 @@
-import cProfile
 import pstats
 import re
 import torch
@@ -8,18 +7,19 @@ from collections import defaultdict, Counter
 from typing import Dict, FrozenSet, List
 
 from SectionSplitter import SectionSplitter
-from ml_util.data import TorchTensorHolder, NameSpaceValidator
+from ml_util.data import TorchTensorHolder
 from ml_util.reports.report_preparer import ReportPreparer
 from ml_util.scispcacy_interface import SciSpacyInterface
 from ml_util.umls.graph_umls import UMLSCache
-from ml_util.umls.quick_umls import QuickUMLS_Matcher, UMLS_Matcher
+from ml_util.umls.quick_umls import QuickUMLS_Matcher
 #from datasets.packaged_modules.json.json import ujson_dumps
 
 from ml_util.BM25_interface import BM25Index
 from ml_util.modelling.faiss_interface import give_SearchIndexWrapper
 from ml_util.modelling.sentence_transformer_interface import SentenceTransformerHolder, SentenceCrossEncoder
-from ml_util.medspacy_interface import MedSpacyHolder
 from scripts.embed_descriptions import CPT_embeddings
+from scripts.score_handler import NullScoreHandler, ScoreHandler, VecScoreHandler, PathScoreHandler, \
+    DistanceScoreHandler
 from src.report_holder import ReportHolder
 
 from ml_util.docux_logger import give_logger, configure_logger, give_default_time
@@ -28,107 +28,6 @@ logger = None
 
 # Create a new variant?
 # Need to implement: give_final_score
-class NullScoreHandler:
-    def give_final_score(self, *args, **kwargs) -> float:
-        return 0.0
-
-class ScoreHandler:
-    def __init__(self,
-                 umls_cache: UMLSCache,
-                 target_cpts: List[str],
-                 retrieved_cpt_cuis: List[str],
-                 ):
-        self.umls_cache = umls_cache
-        self._entries = defaultdict(dict)
-
-        self._target_cpts = tuple(target_cpts)
-        self.retrieved_cpt_cuis = tuple(retrieved_cpt_cuis)
-        self._loc_cui_to_cpts = defaultdict(list)
-        for cpt in self._target_cpts:
-            if cpt not in umls_cache.code_to_cui:
-                print(f"No cui for CPT: {cpt} '{self.umls_cache.cui_to_preferred_term.get(cpt, None)}'")
-            else:
-                for cui in umls_cache.code_to_cui.get(cpt, []):
-                    self._loc_cui_to_cpts[cui].append(cpt)
-
-    def can_add(self, n0, n1, dist, path) -> bool:
-        raise NotImplementedError
-
-    def add(self, n0, n1, dist, path):
-        raise NotImplementedError
-
-    def give_final_score(self, n0) -> float:
-        raise NotImplementedError
-
-    def get(self, n0, n1):
-        try:
-            return self._entries[n0][n1]
-        except KeyError:
-            raise
-    ###
-
-    def give_ref_matches(self,
-                         cpt_id: str):
-        loc_cpt_matches = self._loc_cui_to_cpts.get(cpt_id)
-        if loc_cpt_matches:
-            for_cpt = f"report_cpts: {' '.join(loc_cpt_matches)}"
-        else:
-            for_cpt = 'NO CPT MATCHES'
-        return for_cpt
-
-    def process_cpts_to_umls(self,
-                             umls_ids: List[str],
-                             ):
-        raise NotImplementedError
-
-from typing import Tuple
-
-class VecScoreHandler(ScoreHandler):
-    def __init__(self,
-                 umls_cache: UMLSCache,
-                 target_cpts: List[str],
-                 retrieved_cpt_cuis: List[str],
-                 accept_all: bool,
-                 tensor_holder: TorchTensorHolder,
-                 *args,
-                 **kwargs,
-                 ):
-        super().__init__(umls_cache=umls_cache,
-                         target_cpts=target_cpts,
-                         retrieved_cpt_cuis=retrieved_cpt_cuis)
-        self._entries: Dict[Tuple[int, int], float] = {}
-        self.accept_all = accept_all
-        self.tensor_holder = tensor_holder
-
-        self._umls_name_space: NameSpaceValidator = None
-        self._cpt_name_space: NameSpaceValidator = None
-
-        self._score_tensor: torch.Tensor = None
-
-        self._final_cpt_scores: Dict[str, float]  = {}
-
-    # def can_add(self, n0, n1, dist, path):
-    #     prev_dist = self._entries.get((n0, n1))
-    #     return (prev_dist and prev_dist > dist) is False
-
-    # def add(self, n0, n1, dist, path):
-    #     self._entries[(n0, n1)] = dist
-
-    def process_cpts_to_umls(self,
-                             umls_ids: List[str],  # CPTs
-                             ):
-        (self._cpt_name_space, self._umls_name_space), self._score_tensor = (
-            self.tensor_holder.give_scores(self.retrieved_cpt_cuis, umls_ids))
-
-    def give_final_score(self, cpt_id: str,
-                         ) -> float:
-        if cpt_id not in self._final_cpt_scores:
-            cpt_vec_inds = self._cpt_name_space.give_inds_for_names(
-                self.umls_cache.code_to_cui[cpt_id]
-            )
-            self._final_cpt_scores[cpt_id] =  self._score_tensor[torch.Tensor(cpt_vec_inds)].mean().item()
-
-        return self._final_cpt_scores[cpt_id]
 
 ###
 
@@ -154,123 +53,6 @@ class FakeScores:
 
 ###
 
-class NetworkScoreHandler(ScoreHandler):
-    def __init__(self,
-                 umls_cache: UMLSCache,
-                 target_cpts: List[str],
-                 retrieved_cpt_cuis: List[str],
-                 edge_count_cutoff: int,
-                 accept_all: bool,
-                 *args, **kwargs,
-                 ):
-        super().__init__(umls_cache=umls_cache,
-                         target_cpts=target_cpts,
-                         retrieved_cpt_cuis=retrieved_cpt_cuis)
-        self.edge_count_cutoff = edge_count_cutoff
-        self.accept_all = accept_all
-        self.fake_scores = FakeScores(self.umls_cache)
-
-    def process_cpts_to_umls(self,
-                             # sources: List[str], # document UMLS CUIs
-                             umls_ids: List[str],  # CPTs
-                             ):
-        inputs = [self.umls_cache.graph_holder.filter_illegal_cuis(set(d))
-                  for d in (umls_ids, self.retrieved_cpt_cuis)]
-        print(f"input counts: {[len(i) for i in inputs]}")
-        paths_to_cpts = (
-            self.umls_cache.shortest_paths_between_cui_sets(*inputs,
-                                                            cutoff=self.edge_count_cutoff))
-        for umls_id, for_umls_id in paths_to_cpts.items():
-            print(
-                f"umls_id: {umls_id} "
-                f"{self.umls_cache.cui_to_preferred_term.get(umls_id, 'NO DESCRIPTION FOUND!')}")
-            skipped = []
-            for cpt_id, (dist, path) in for_umls_id.items():
-                code = self.umls_cache.cui_to_code[cpt_id]
-                okay = True
-                acceptable = True
-                path_with_data = None
-                if len(path) > 0:
-                    path_with_data = self.umls_cache.give_path_with_data(umls_id, cpt_id, path, reverse=True)
-                    okay = self.umls_cache.secondary_okay_path(path_with_data)
-                    if len(path_with_data) == 1:
-                        if self.umls_cache.rep_for_immediate(path_with_data[0]) is None:
-                            acceptable = False
-                            # skipped.append((dist, path_with_data))
-                            # continue
-                    else:
-                        if not self.umls_cache.acceptable_feature_path(path_with_data):
-                            acceptable = False
-                            # skipped.append((dist, path_with_data))
-                            # continue
-                if not okay and not self.accept_all:
-                    skipped.append((dist, path_with_data, acceptable))
-                    continue
-
-                if not self.can_add(code, umls_id, dist, path):
-                    continue
-
-                print(f"USE:\tacceptable: {acceptable}\td: {self.fake_scores.present_dist(umls_id, cpt_id, dist)}"
-                      f"\t{self.give_ref_matches(cpt_id)} "
-                      f"{self.umls_cache.show_path(path_with_data) if path_with_data else 'DIRECT'}")
-                # paths_code_to_umls[code][umls_id] = path
-                # score_handler.add(code, umls_id, path, dist)
-                self.add(code, umls_id, dist, path)
-            # for s in sorted(skipped, key=lambda x: (len(x), x[0].first_cui, x[0].second_cui)):
-            for dist, s, acceptable in sorted(skipped, key=lambda x:
-            (x[0], len(x[1]), x[1][0].first_cui, x[1][0].second_cui)):
-                # okay = umls_cache.secondary_okay_path(s)
-                print(f"SKIPPED:\t{self.fake_scores.present_dist(umls_id, cpt_id, dist)}\tacceptable: {acceptable}\t"
-                      f"{self.give_ref_matches(s[0].first_cui)}\t"
-                      f"{self. umls_cache.show_path(s)}")
-                pass
-            pass
-        pass
-
-
-class PathScoreHandler(NetworkScoreHandler):
-    def can_add(self, n0, n1, dist, path) -> bool:
-        for_code = self._entries.get(n0)
-        if for_code:
-            prev_path = for_code.get(n1)
-            if prev_path and len(prev_path) <= len(path):
-                return False
-
-        return True
-
-    def add(self, n0, n1, dist, path):
-        self._entries[n0][n1] = path
-
-    def give_final_score(self, n0) -> float:
-        return float(sum([1 / (1 + len(v)) for v in self._entries[n0].values()]))
-
-
-class DistanceScoreHandler(NetworkScoreHandler):
-    def __init__(self,
-                 decay_rate: float = 2.0,
-                 *args,
-                 **kwargs, ):
-        super().__init__(*args, **kwargs)
-        self._decay_rate = decay_rate
-
-    def can_add(self, n0, n1, dist, path) -> bool:
-        for_code = self._entries.get(n0)
-        if for_code:
-            prev = for_code.get(n1)
-            if prev is not None and (prev[0] < dist or prev[1] < len(path)):
-                return False
-
-        return True
-
-    def add(self, n0, n1, dist, path):
-        self._entries[n0][n1] = (dist, len(path))
-
-    def give_final_score(self, n0) -> float:
-        # multi = lambda score, cnt: -np.log(score / float(cnt)) * ((1.0 / cnt) ** (1 / self._decay_rate))
-        # multi = lambda score, cnt: -np.log(score / float(cnt))
-        # single = lambda score: -np.log(score)
-        return float(sum([1.0 / (1 + score) ** 1 / self._decay_rate
-                          for score, cnt in self._entries[n0].values()]))
 
 def main():
     import argparse
@@ -308,6 +90,8 @@ def main():
     parser.add_argument('--merge_short_hr', action='store_true')
     parser.add_argument('--simple_merge_left', type=int, default=100)
     parser.add_argument('--simple_merge_right', type=int, default=200)
+    parser.add_argument('--net_conv_dir', type=str,
+                        help="Input directory for ml_util.umls.neural_graph.scorer.UMLSPairScorer")
     args = parser.parse_args()
     global logger
     logger = give_logger()
@@ -316,6 +100,13 @@ def main():
 
     input_jsonl = args.input_jsonl
     min_retain_portion = args.min_retain_portion
+    l2_norm = args.l2_norm
+    n_nearest = args.n_nearest
+    cpt_embeddings = CPT_embeddings.load(args.embedding_dump_dir, l2_norm=l2_norm)
+    search_index = give_SearchIndexWrapper(cpt_embeddings.embeddings,
+                                           similarity_measure='cosine_similarity' if l2_norm else 'ref_norm')
+    model_holder = SentenceTransformerHolder.create(model_name=args.model_name)
+    recall_by_cpt = defaultdict(Counter)
 
     cui2vec = None
     if args.cui2vec_csv:
@@ -326,23 +117,6 @@ def main():
     if args.bm25_dir is not None:
         import os
         bm25_index = BM25Index.load(os.path.join(args.bm25_dir, 'bm25_index.json'))
-
-    report_preparer = ReportPreparer(skip_sent_split=not args.impose_sent_split,
-                                     need_merge_short_hr=args.merge_short_hr,
-                                     simple_merge_left=args.simple_merge_left,
-                                     simple_merge_right=args.simple_merge_right)
-    by_odi: Dict[str, ReportHolder] = {}
-    with open(input_jsonl, "r", encoding='utf-8') as in_H:
-        for line in in_H:
-            try:
-                rh = ReportHolder.from_dict(json.loads(line.strip()))
-            except:
-                raise
-            assert rh.operative_document_id not in by_odi
-            by_odi[rh.operative_document_id] = rh
-            # DIGDI
-            # if len(by_odi) >= 10:
-            #     break
 
     # medspacy_holder = MedSpacyHolder()
     section_splitter = SectionSplitter()
@@ -378,20 +152,14 @@ def main():
         umls_cache = None
         fake_scores = None
 
-    l2_norm = args.l2_norm
-    n_nearest = args.n_nearest
-    cpt_embeddings = CPT_embeddings.load(args.embedding_dump_dir, l2_norm=l2_norm)
-    search_index = give_SearchIndexWrapper(cpt_embeddings.embeddings,
-                                           similarity_measure='cosine_similarity' if l2_norm else 'ref_norm')
-    model_holder = SentenceTransformerHolder.create(model_name=args.model_name)
-    recall_by_cpt = defaultdict(Counter)
     cross_encoder = None if args.cross_encoder_model is None \
         else SentenceCrossEncoder.create(args.cross_encoder_model,
                                          trust_remote_code=args.cross_trust_remote)
-
     # ?? DIGDI
     def get_score_handler(*loc_args, **kwargs) -> ScoreHandler:
-        if cui2vec:
+        if args.net_conv_dir:
+            c = NetConvHander
+        elif cui2vec:
             c = VecScoreHandler
         elif args.use_distances:
             c = DistanceScoreHandler
@@ -400,8 +168,97 @@ def main():
 
         return c(*loc_args, **kwargs)
 
+
+    report_preparer = ReportPreparer(skip_sent_split=not args.impose_sent_split,
+                                     need_merge_short_hr=args.merge_short_hr,
+                                     simple_merge_left=args.simple_merge_left,
+                                     simple_merge_right=args.simple_merge_right)
+    by_odi: Dict[str, ReportHolder] = {}
+    with open(input_jsonl, "r", encoding='utf-8') as in_H:
+        for line in in_H:
+            try:
+                rh = ReportHolder.from_dict(json.loads(line.strip()))
+            except:
+                raise
+            assert rh.operative_document_id not in by_odi
+            by_odi[rh.operative_document_id] = rh
+            # DIGDI
+            # if len(by_odi) >= 10:
+            #     break
+
     do_purge = args.purge_skip_sections
+
+    def give_simple(raw_doc):
+        spans_with_pre = [s for s in report_preparer.give_spans_with_pre(raw_doc)]
+        return [raw_doc[s.text_start:s.text_end]
+                for s in spans_with_pre]
+
+    def get_texts(raw_doc):
+        texts = []
+
+        if not do_purge:
+            texts = give_simple(raw_doc)
+        else:
+            offs, stretches = section_splitter.purge_skip_sections(raw_doc)
+            if sum([len(s) for s in stretches]) < min_retain_portion * len(raw_doc):
+                texts = give_simple()
+                logger.debug(f"Got less than {min_retain_portion} for: {odi}.")
+            else:
+                for off, stretch in zip(*section_splitter.purge_skip_sections(raw_doc)):
+                    for s in report_preparer.give_spans_with_pre(stretch):
+                        texts.append(raw_doc[off + s.text_start:off + s.text_end])
+
+        return texts
+
+    def run_cross_encoder(indices):
+        new_sim = []
+        new_indices = []
+        for t_ind, t, in enumerate(texts):
+            cross_scores = cross_encoder.score_queries(
+                queries=[cpt_embeddings.descriptions[i] for i in indices[t_ind]],
+                candidate=t)
+            cs_as = (-1 * cross_scores).argsort()
+            new_sim.append(cross_scores[cs_as])
+            new_indices.append(indices[t_ind][cs_as])
+        distances, indices = [np.stack(l) for l in (new_sim, new_indices)]
+
+        return distances, indices
+
+
+
     inc_by_rank: List[np.ndarray] = []
+
+    class KeepMin:
+        def __init__(self):
+            self.value = 999999999999999
+
+        def add(self, v):
+            self.value = min(v, self.value)
+
+    def add_ids(ids):
+        found_mins: Dict[int, KeepMin] = defaultdict(KeepMin)
+        for id_a in ids:
+            for r, id in enumerate(id_a.tolist()):
+                found_mins[id].add(r)
+
+        by_min = np.zeros((ids.shape[-1]), dtype=np.int16)
+        for k, v in found_mins.items():
+            by_min[v.value] += 1
+        for i in range(ids.shape[-1] - 1, 0, -1):
+            by_min[i] = by_min[:i + 1].sum()
+        inc_by_rank.append(by_min)
+
+    def impose_bm25(distances, ids):
+        d, i = bm25_index.search(texts)
+        bm_distances, bm_ids, bm_indices = [torch.tensor(a) for a in bm25_index.id_compress(d, i)]
+        distances, ids = \
+            cpt_embeddings.min_max_interpolate(
+                all_distances=[distances, bm_distances],
+                all_ids=[ids, bm_ids],
+                add_weights=[bm25_weight])
+
+        return distances, ids
+
     with open(args.output_jsonl, "w", encoding='utf-8') as out_H:
         PROFILE = False
         if True:
@@ -411,70 +268,20 @@ def main():
             for odi in all_odi:
                 logger.debug(f"odi: {odi}")
                 raw_doc = by_odi[odi].pdf_text
-                texts = []
-
-                def give_simple():
-                    spans_with_pre = [s for s in report_preparer.give_spans_with_pre(raw_doc)]
-                    return [raw_doc[s.text_start:s.text_end]
-                            for s in spans_with_pre]
-
-                if not do_purge:
-                    texts = give_simple()
-                else:
-                    offs, stretches = section_splitter.purge_skip_sections(raw_doc)
-                    if sum([len(s) for s in stretches]) < min_retain_portion * len(raw_doc):
-                        texts = give_simple()
-                        logger.debug(f"Got less than {min_retain_portion} for: {odi}.")
-                    else:
-                        for off, stretch in zip(*section_splitter.purge_skip_sections(raw_doc)):
-                            for s in report_preparer.give_spans_with_pre(stretch):
-                                texts.append(raw_doc[off + s.text_start:off + s.text_end])
+                texts = get_texts(raw_doc)
 
                 doc_embeddings = torch.cat([b for b in model_holder.encode_no_grad(texts)])
                 if l2_norm:
                     doc_embeddings = torch.nn.functional.normalize(doc_embeddings)
                 distances, indices = search_index.search(doc_embeddings, n_nearest=n_nearest)
                 if cross_encoder is not None:
-                    new_sim = []
-                    new_indices = []
-                    for t_ind, t, in enumerate(texts):
-                        cross_scores = cross_encoder.score_queries(
-                            queries=[cpt_embeddings.descriptions[i] for i in indices[t_ind]],
-                            candidate=t)
-                        cs_as = (-1 * cross_scores).argsort()
-                        new_sim.append(cross_scores[cs_as])
-                        new_indices.append(indices[t_ind][cs_as])
-                    distances, indices = [np.stack(l) for l in (new_sim, new_indices)]
+                    distances, indices = run_cross_encoder(indices)
 
                 distances, ids, indices = [torch.tensor(a) for a in cpt_embeddings.id_compress(distances, indices)]
 
-                class KeepMin:
-                    def __init__(self):
-                        self.value = 999999999999999
-
-                    def add(self, v):
-                        self.value = min(v, self.value)
-
-                found_mins: Dict[int, KeepMin] = defaultdict(KeepMin)
-                for id_a in ids:
-                    for r, id in enumerate(id_a.tolist()):
-                        found_mins[id].add(r)
-
-                by_min = np.zeros((ids.shape[-1]), dtype=np.int16)
-                for k, v in found_mins.items():
-                    by_min[v.value] += 1
-                for i in range(ids.shape[-1] -1, 0, -1):
-                    by_min[i] = by_min[:i+1].sum()
-                inc_by_rank.append(by_min)
-
+                add_ids(ids)
                 if bm25_index is not None:
-                    d, i = bm25_index.search(texts)
-                    bm_distances, bm_ids, bm_indices = [torch.tensor(a) for a in bm25_index.id_compress(d, i)]
-                    distances, ids = \
-                        cpt_embeddings.min_max_interpolate(
-                            all_distances=[distances, bm_distances],
-                            all_ids=[ids, bm_ids],
-                            add_weights=[bm25_weight])
+                    impose_bm25(distances, ids)
 
                 target_cpts = sorted(list(set([pc.cpt4Code for pc in by_odi[odi].procedure_combinations])))
 
