@@ -81,6 +81,11 @@ def main():
     sbert_model = "codefuse-ai/F2LLM-v2-0.6B-Preview"
     work_dir = 'clinical_cpt_F2LLM-v2-0.6B-Preview'
 
+    sbert_model = "pritamdeka/S-PubMedBert-MS-MARCO"
+    task_type = 'ClinicianCPT'
+    code_file = "/Users/stevenfincke/PycharmProjects/CPT_CodeModel/ClinicianDescriptor.tsv"
+    work_dir = 'clinical_cpt_MS-MARCO_all'
+    min_form_count = 1
 
     if False:
         # last hidden state
@@ -106,9 +111,12 @@ def main():
     # l2_norm = True
     try:
         if True:
-            CPT_embeddings.cache(work_dir, sbert_model=sbert_model, code_file=code_file,
+            CPT_embeddings.cache(work_dir,
+                                 sbert_model=sbert_model,
+                                 code_file=code_file,
                                  task_type=task_type,
-                                 use_all_representations=(task_type == 'ClinicianCPT'))
+                                 use_all_representations=(task_type == 'ClinicianCPT'),
+                                 min_form_count_per_class=min_form_count)
         else:
             CPT_embeddings.cache(work_dir,
                                  hf_model=hf_model,

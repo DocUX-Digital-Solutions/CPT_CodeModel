@@ -17,10 +17,20 @@ from ml_util.umls.quick_umls import QuickUMLS_Matcher
 from ml_util.BM25_interface import BM25Index
 from ml_util.modelling.faiss_interface import give_SearchIndexWrapper
 from ml_util.modelling.sentence_transformer_interface import SentenceTransformerHolder, SentenceCrossEncoder
-from scripts.embed_descriptions import CPT_embeddings
-from scripts.score_handler import NullScoreHandler, ScoreHandler, VecScoreHandler, PathScoreHandler, \
-    DistanceScoreHandler
-from src.report_holder import ReportHolder
+
+from umls.neural_graph.neural import MultiDomainUMLSReranker
+from umls.neural_graph.scorer import UMLSPairScorer
+
+# from scripts.embed_descriptions import CPT_embeddings
+# from scripts.score_handler import NullScoreHandler, UMLSCacheScoreHandler, VecScoreHandler, PathScoreHandler, \
+#     DistanceScoreHandler, GNNScoreHandler, ScoreHandler
+# from src.report_holder import ReportHolder
+
+from ml_util.reports.sandbox.embed_descriptions import  CPT_embeddings
+from ml_util.reports.sandbox.score_handler import (NullScoreHandler, VecScoreHandler, PathScoreHandler,
+                                                   DistanceScoreHandler, ScoreHandler)
+from reports.sandbox.gnn_score_handler import GNNScoreHandler
+from ml_util.reports.sandbox.report_holder import ReportHolder
 
 from ml_util.docux_logger import give_logger, configure_logger, give_default_time
 
@@ -90,8 +100,12 @@ def main():
     parser.add_argument('--merge_short_hr', action='store_true')
     parser.add_argument('--simple_merge_left', type=int, default=100)
     parser.add_argument('--simple_merge_right', type=int, default=200)
-    parser.add_argument('--net_conv_dir', type=str,
-                        help="Input directory for ml_util.umls.neural_graph.scorer.UMLSPairScorer")
+    parser.add_argument('--gnn_directory', type=str,
+                        help="Main model directory for GNN.")
+    parser.add_argument('--gnn_domain_name', type=str,
+                        default=MultiDomainUMLSReranker.generic_domain_name)
+    parser.add_argument('--gnn_intermediate_dir', type=str,
+                        help="Directory for objects cached in preparation for GNN model training.")
     args = parser.parse_args()
     global logger
     logger = give_logger()
@@ -127,6 +141,9 @@ def main():
     else:
         umls_matcher = QuickUMLS_Matcher(threshold=args.quick_umls_threshold)
 
+    umls_cache = None
+    fake_scores = None
+    gnn = None
     if args.umls_cache_dir:
         umls_cache = UMLSCache.load(args.umls_cache_dir)
 
@@ -148,25 +165,28 @@ def main():
                 return f"d: {dist:.4f} ({fake:.4f} -> {dist - fake:+.4f})"
 
         fake_scores = FakeScores()
-    else:
-        umls_cache = None
-        fake_scores = None
+        cpt_code_to_cui = umls_cache.code_to_cui
+    elif args.gnn_directory:
+        gnn = UMLSPairScorer.load(args.gnn_directory, args.gnn_domain_name, args.gnn_intermediate_dir,
+                                  num_neighbors=args.num_neighbors)
+        cpt_code_to_cui = gnn.cpt_code_to_cui
 
     cross_encoder = None if args.cross_encoder_model is None \
         else SentenceCrossEncoder.create(args.cross_encoder_model,
                                          trust_remote_code=args.cross_trust_remote)
     # ?? DIGDI
     def get_score_handler(*loc_args, **kwargs) -> ScoreHandler:
-        if args.net_conv_dir:
-            c = NetConvHander
-        elif cui2vec:
-            c = VecScoreHandler
-        elif args.use_distances:
-            c = DistanceScoreHandler
+        if gnn:
+            return GNNScoreHandler(gnn,*loc_args, **kwargs)
         else:
-            c = PathScoreHandler
+            if cui2vec:
+                c = VecScoreHandler
+            elif args.use_distances:
+                c = DistanceScoreHandler
+            else:
+                c = PathScoreHandler
 
-        return c(*loc_args, **kwargs)
+            return c(*loc_args, **kwargs)
 
 
     report_preparer = ReportPreparer(skip_sent_split=not args.impose_sent_split,
@@ -201,7 +221,7 @@ def main():
         else:
             offs, stretches = section_splitter.purge_skip_sections(raw_doc)
             if sum([len(s) for s in stretches]) < min_retain_portion * len(raw_doc):
-                texts = give_simple()
+                texts = give_simple(raw_doc)
                 logger.debug(f"Got less than {min_retain_portion} for: {odi}.")
             else:
                 for off, stretch in zip(*section_splitter.purge_skip_sections(raw_doc)):
@@ -290,7 +310,7 @@ def main():
                     index_matches = [
                         cpt_cui
                         for id in ids.unique().tolist() if id >= 0
-                        for cpt_cui in umls_cache.code_to_cui.get(cpt_embeddings.label_for_id(id), [])]
+                        for cpt_cui in cpt_code_to_cui.get(cpt_embeddings.label_for_id(id), [])]
 
                     # CACHE
                     score_handler = get_score_handler(umls_cache=umls_cache,

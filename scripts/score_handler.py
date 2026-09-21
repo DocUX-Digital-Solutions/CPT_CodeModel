@@ -6,31 +6,20 @@ import torch
 from data import TorchTensorHolder, NameSpaceValidator
 from scripts.prepare_reports import FakeScores
 from umls.graph_umls import UMLSCache
+from umls.neural_graph.scorer import UMLSPairScorer
 
 
 class NullScoreHandler:
     def give_final_score(self, *args, **kwargs) -> float:
         return 0.0
 
-
 class ScoreHandler:
     def __init__(self,
-                 umls_cache: UMLSCache,
                  target_cpts: List[str],
                  retrieved_cpt_cuis: List[str],
                  ):
-        self.umls_cache = umls_cache
-        self._entries = defaultdict(dict)
-
         self._target_cpts = tuple(target_cpts)
         self.retrieved_cpt_cuis = tuple(retrieved_cpt_cuis)
-        self._loc_cui_to_cpts = defaultdict(list)
-        for cpt in self._target_cpts:
-            if cpt not in umls_cache.code_to_cui:
-                print(f"No cui for CPT: {cpt} '{self.umls_cache.cui_to_preferred_term.get(cpt, None)}'")
-            else:
-                for cui in umls_cache.code_to_cui.get(cpt, []):
-                    self._loc_cui_to_cpts[cui].append(cpt)
 
     def can_add(self, n0, n1, dist, path) -> bool:
         raise NotImplementedError
@@ -46,7 +35,31 @@ class ScoreHandler:
             return self._entries[n0][n1]
         except KeyError:
             raise
-    ###
+
+    def process_cpts_to_umls(self,
+                             umls_ids: List[str],
+                             ):
+        raise NotImplementedError
+
+
+class UMLSCacheScoreHandler(ScoreHandler):
+    def __init__(self,
+                 umls_cache: UMLSCache,
+                 target_cpts: List[str],
+                 retrieved_cpt_cuis: List[str],
+                 ):
+        super().__init__(target_cpts, retrieved_cpt_cuis)
+
+        self.umls_cache = umls_cache
+        self._entries = defaultdict(dict)
+
+        self._loc_cui_to_cpts = defaultdict(list)
+        for cpt in self._target_cpts:
+            if cpt not in umls_cache.code_to_cui:
+                print(f"No cui for CPT: {cpt} '{self.umls_cache.cui_to_preferred_term.get(cpt, None)}'")
+            else:
+                for cui in umls_cache.code_to_cui.get(cpt, []):
+                    self._loc_cui_to_cpts[cui].append(cpt)
 
     def give_ref_matches(self,
                          cpt_id: str):
@@ -57,13 +70,11 @@ class ScoreHandler:
             for_cpt = 'NO CPT MATCHES'
         return for_cpt
 
-    def process_cpts_to_umls(self,
-                             umls_ids: List[str],
-                             ):
-        raise NotImplementedError
+
+    ###
 
 
-class VecScoreHandler(ScoreHandler):
+class VecScoreHandler(UMLSCacheScoreHandler):
     def __init__(self,
                  umls_cache: UMLSCache,
                  target_cpts: List[str],
@@ -111,7 +122,7 @@ class VecScoreHandler(ScoreHandler):
         return self._final_cpt_scores[cpt_id]
 
 
-class NetworkScoreHandler(ScoreHandler):
+class NetworkScoreHandler(UMLSCacheScoreHandler):
     def __init__(self,
                  umls_cache: UMLSCache,
                  target_cpts: List[str],
@@ -228,3 +239,19 @@ class DistanceScoreHandler(NetworkScoreHandler):
         # single = lambda score: -np.log(score)
         return float(sum([1.0 / (1 + score) ** 1 / self._decay_rate
                           for score, cnt in self._entries[n0].values()]))
+
+class GNNScoreHandler(ScoreHandler):
+    def __init__(self,
+                 scorer: UMLSPairScorer,
+                 *args, **kwargs):
+        self.scorer = scorer
+
+    @classmethod
+    def create(cls,
+               directory: str,
+               domain_name: str,
+               intermediate_dir: str,
+               ):
+        umls_pair_scorer = UMLSPairScorer.load(directory, domain_name, intermediate_dir)
+
+        return cls(umls_pair_scorer)
