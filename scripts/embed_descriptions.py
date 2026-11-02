@@ -8,7 +8,8 @@ import numpy as np
 from difflib import SequenceMatcher
 import jarowinkler as jw
 
-from ml_util.CPT_embeddings import CPT_embeddings, ByRes
+from ml_util.CPT_embeddings import CPT_embeddings
+from by_nbest import ByNBest
 
 '''
 Notes:
@@ -87,6 +88,15 @@ def main():
     work_dir = 'clinical_cpt_MS-MARCO_all'
     min_form_count = 1
 
+    sbert_model = "pritamdeka/S-PubMedBert-MS-MARCO"
+    task_type = 'UMLS_CPT'
+    code_file = "/Users/stevenfincke/git/docux_ml_util/ml_util/umls/neural_graph/all_intermediate/intermediate_12/atom_cpt_table.csv"
+    work_dir = 'UMLS_cpt_MS-MARCO_all_2'
+    min_form_count = 1
+
+    work_dir = 'UMLS_cpt_MS-MARCO_all_expand_2'
+    scispacy_expand = True
+
     if False:
         # last hidden state
         hf_model = "ncbi/MedCPT-Query-Encoder"
@@ -115,8 +125,21 @@ def main():
                                  sbert_model=sbert_model,
                                  code_file=code_file,
                                  task_type=task_type,
+                                 scispacy_expand=scispacy_expand,
+                                 use_all_representations=(task_type == 'UMLS_CPT'),
+                                 min_form_count_per_class=min_form_count,
+                                 table_kwargs={'include_free_hop': True,
+                                               'keep_suppressible': True,
+                                               'english_only': True,
+                                               }
+                                 )
+        elif True:
+            CPT_embeddings.cache(work_dir,
+                                 sbert_model=sbert_model,
+                                 code_file=code_file,
+                                 task_type=task_type,
                                  use_all_representations=(task_type == 'ClinicianCPT'),
-                                 min_form_count_per_class=min_form_count)
+                                 )
         else:
             CPT_embeddings.cache(work_dir,
                                  hf_model=hf_model,
@@ -124,17 +147,18 @@ def main():
                                  max_seq_length=max_seq_length,
                                  prior_dir=ontology_dump_dir)
     except ValueError:
-        print(f"Will load from cache dir.")
+        raise
+        # print(f"Will load from cache dir.")
 
     cpt_embeddings = CPT_embeddings.load(work_dir, l2_norm=l2_norm,
-                                         prior_dir=ontology_dump_dir)
+                                         prior_dir=ontology_dump_dir, skip_matrix=True)
     try:
-        by_res = ByRes.from_json_dict(work_dir, l2_norm=l2_norm)
+        by_res = ByNBest.from_json_dict(work_dir, l2_norm=l2_norm)
     except ValueError:
         res = [0.01, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, .7, 0.9, 0.95, 0.99]
         # res = [.1, .25, .5, .6, .7, .8, .9]
         by_res = cpt_embeddings.give_confusion_classes(resolutions=res, l2_norm=l2_norm)
-        ByRes.dump_json_dict(work_dir, by_res, l2_norm=l2_norm)
+        ByNBest.dump_json_dict(work_dir, by_res, l2_norm=l2_norm)
 
     top_opts = lambda: closest_opts[
         sorted([(k, v) for k, v in closest.items()],

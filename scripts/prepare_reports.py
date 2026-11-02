@@ -4,7 +4,7 @@ import torch
 import numpy as np
 from collections import defaultdict, Counter
 
-from typing import Dict, FrozenSet, List
+from typing import Dict, FrozenSet
 
 from SectionSplitter import SectionSplitter
 from ml_util.data import TorchTensorHolder
@@ -18,8 +18,8 @@ from ml_util.BM25_interface import BM25Index
 from ml_util.modelling.faiss_interface import give_SearchIndexWrapper
 from ml_util.modelling.sentence_transformer_interface import SentenceTransformerHolder, SentenceCrossEncoder
 
-from umls.neural_graph.neural import MultiDomainUMLSReranker
-from umls.neural_graph.scorer import UMLSPairScorer
+from ml_util.umls.neural_graph.neural import MultiDomainUMLSReranker
+from ml_util.umls.neural_graph.all_scorer.scorer import UMLSPairScorer
 
 # from scripts.embed_descriptions import CPT_embeddings
 # from scripts.score_handler import NullScoreHandler, UMLSCacheScoreHandler, VecScoreHandler, PathScoreHandler, \
@@ -29,7 +29,7 @@ from umls.neural_graph.scorer import UMLSPairScorer
 from ml_util.reports.sandbox.embed_descriptions import  CPT_embeddings
 from ml_util.reports.sandbox.score_handler import (NullScoreHandler, VecScoreHandler, PathScoreHandler,
                                                    DistanceScoreHandler, ScoreHandler)
-from reports.sandbox.gnn_score_handler import GNNScoreHandler
+from ml_util.reports.sandbox.gnn_score_handler import GNNScoreHandler
 from ml_util.reports.sandbox.report_holder import ReportHolder
 
 from ml_util.docux_logger import give_logger, configure_logger, give_default_time
@@ -144,7 +144,14 @@ def main():
     umls_cache = None
     fake_scores = None
     gnn = None
-    if args.umls_cache_dir:
+    if args.gnn_directory:
+        gnn = UMLSPairScorer.load(args.gnn_directory, args.gnn_domain_name, args.gnn_intermediate_dir,
+                                  num_neighbors=args.num_neighbors, use_supernodes=True)
+        cpt_code_to_cui = gnn.cpt_code_to_cui
+
+        if args.umls_cache_dir:
+            umls_cache = UMLSCache.load(args.umls_cache_dir)
+    elif args.umls_cache_dir:
         umls_cache = UMLSCache.load(args.umls_cache_dir)
 
         class FakeScores:
@@ -166,10 +173,6 @@ def main():
 
         fake_scores = FakeScores()
         cpt_code_to_cui = umls_cache.code_to_cui
-    elif args.gnn_directory:
-        gnn = UMLSPairScorer.load(args.gnn_directory, args.gnn_domain_name, args.gnn_intermediate_dir,
-                                  num_neighbors=args.num_neighbors)
-        cpt_code_to_cui = gnn.cpt_code_to_cui
 
     cross_encoder = None if args.cross_encoder_model is None \
         else SentenceCrossEncoder.create(args.cross_encoder_model,
@@ -244,30 +247,6 @@ def main():
 
         return distances, indices
 
-
-
-    inc_by_rank: List[np.ndarray] = []
-
-    class KeepMin:
-        def __init__(self):
-            self.value = 999999999999999
-
-        def add(self, v):
-            self.value = min(v, self.value)
-
-    def add_ids(ids):
-        found_mins: Dict[int, KeepMin] = defaultdict(KeepMin)
-        for id_a in ids:
-            for r, id in enumerate(id_a.tolist()):
-                found_mins[id].add(r)
-
-        by_min = np.zeros((ids.shape[-1]), dtype=np.int16)
-        for k, v in found_mins.items():
-            by_min[v.value] += 1
-        for i in range(ids.shape[-1] - 1, 0, -1):
-            by_min[i] = by_min[:i + 1].sum()
-        inc_by_rank.append(by_min)
-
     def impose_bm25(distances, ids):
         d, i = bm25_index.search(texts)
         bm_distances, bm_ids, bm_indices = [torch.tensor(a) for a in bm25_index.id_compress(d, i)]
@@ -321,7 +300,7 @@ def main():
                                                       tensor_holder=cui2vec)
 
                     umls_matches = {t[0]: t for t in umls_matcher.give_matches(raw_doc).by_cui()}
-                    score_handler.process_cpts_to_umls(list(umls_matches.keys()))
+                    score_handler.process_cpts_to_umls(lr, list(umls_matches.keys()))
                 else:
                     index_matches = [
                         cpt_embeddings.label_for_id(id)

@@ -5,8 +5,8 @@ import torch
 
 from data import TorchTensorHolder, NameSpaceValidator
 from scripts.prepare_reports import FakeScores
-from umls.graph_umls import UMLSCache
-from umls.neural_graph.scorer import UMLSPairScorer
+from ml_util.umls.graph_umls import UMLSCache
+from ml_util.umls.neural_graph.all_scorer.scorer import UMLSPairScorer
 
 
 class NullScoreHandler:
